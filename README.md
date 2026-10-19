@@ -9,7 +9,7 @@ radios, PN532 RFID, IR transceiver, GPS).
 > You are responsible for how you use it. The jamming tools some other
 > firmwares carry are deliberately **not** included.
 
-Based on the original [ESP32-DIV firmware by CiferTech](https://github.com/cifer-tech/ESP32-DIV) (MIT), with the M5SHARK ctOS interface, additional tools, and a full QA toolchain. Binaries for end users live in [SHARKDIV-updates](https://github.com/M5Shark/SHARKDIV-updates).
+Based on the original [ESP32-DIV firmware by CiferTech](https://github.com/cifer-tech/ESP32-DIV) (MIT), with the M5SHARK ctOS interface, additional tools, and a full QA toolchain. Binaries for end users live in this repo's [Releases](https://github.com/M5Shark/SHARKDIV-firmware/releases).
 
 ## Feature map
 
