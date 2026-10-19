@@ -63,7 +63,7 @@ arduino-cli path in step 5 passes the same flag automatically).
 
 ## 4. Board settings (Arduino IDE)
 
-Open `ESP32-DIV/ESP32-DIV.ino`, then under **Tools** set:
+Open `sharkdiv/ESP32-DIV.ino`, then under **Tools** set:
 
 | Setting                | Value                          |
 |------------------------|--------------------------------|

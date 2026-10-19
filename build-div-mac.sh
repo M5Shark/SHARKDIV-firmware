@@ -21,7 +21,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SKETCH="$HERE/ESP32-DIV"
+SKETCH="$HERE/sharkdiv"
 
 ARDUINO_CLI="${ARDUINO_CLI:-$HOME/Projects/M5Shark/.tools/arduino-cli/arduino-cli}"
 CONFIG="${CONFIG:-$HOME/Projects/M5Shark/.tools/arduino-cli-210.yaml}"
@@ -37,4 +37,4 @@ EXTRA_LIBS="${ESP32DIV_LIBS:-$HERE/libs}"
   "$SKETCH"
 
 echo
-echo "Done: $HERE/build/ESP32-DIV.ino.bin (flash at 0x0 with esptool)"
+echo "Done: $HERE/build/sharkdiv.ino.bin (flash at 0x0 with esptool)"

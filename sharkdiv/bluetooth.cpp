@@ -8135,7 +8135,7 @@ static const char* kPayloads[] = {
   "hello",
   "Hello World!",
   "test123",
-  "ESP32-DIV",
+  "SHARKDIV",
   "CiferTech",
   "admin",
 };
