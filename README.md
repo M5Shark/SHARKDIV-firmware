@@ -34,6 +34,13 @@ Extras: ctOS-style Skull Rain boot animation, phosphor-green boot palette, 4 the
 
 See `FLASHING.md` for flashing over USB (115200 baud) and OTA.
 
+## Remote testing & app builder (MCP)
+
+[`tools/sharkdiv_mcp.py`](tools/sharkdiv_mcp.py) is a zero-dependency MCP
+server that drives the device over USB — tap navigation, state reports,
+reset-with-boot-log, and an app builder that creates/builds/flashes new
+user apps end to end. See [tools/README.md](tools/README.md).
+
 ## User apps
 
 A new app is one source file + one line in `UserApps.cpp` — it then appears
