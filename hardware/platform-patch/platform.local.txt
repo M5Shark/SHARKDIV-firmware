@@ -1,0 +1,11 @@
+# Copy this file into your installed ESP32 boards package folder, next to its
+# platform.txt, e.g.:
+#   macOS:   ~/Library/Arduino15/packages/esp32/hardware/esp32/<version>/
+#   Windows: %LOCALAPPDATA%\Arduino15\packages\esp32\hardware\esp32\<version>\
+#
+# Why: since arduino-esp32 ~2.0.6 the SDK library defines
+# ieee80211_raw_frame_sanity_check as a strong symbol, so the sketch-level
+# override used by the WiFi Deauther tool no longer links
+# ("multiple definition" error). This local override appends the standard
+# --allow-multiple-definition flag, which keeps the sketch's definition.
+compiler.c.elf.extra_flags=-Wl,--allow-multiple-definition

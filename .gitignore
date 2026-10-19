@@ -1,0 +1,14 @@
+# Build artifacts
+build/
+*.bin
+*.elf
+*.map
+*.o
+*.a
+
+# Arduino / editor cruft
+.vscode/
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
