@@ -79,10 +79,10 @@ uint16_t uiUniversalColor();
 
 /*──────────────────── Project Info ────────────────────*/
 #ifndef ESP32DIV_NAME
-#define ESP32DIV_NAME "ESP32-DIV"
+#define ESP32DIV_NAME "SHARKDIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.7.23"
+#define ESP32DIV_VERSION "v1.7.24"
 #endif
 
 
@@ -117,7 +117,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #endif
 #elif defined(BOARD_ESP32_DIV_V1)
 #ifndef ESP32DIV_BOARD_NAME
-#define ESP32DIV_BOARD_NAME "ESP32-DIV V1 ESP32U"
+#define ESP32DIV_BOARD_NAME "SHARKDIV"
 #endif
 #ifndef HAS_PCF8574_BUTTONS
 #define HAS_PCF8574_BUTTONS 0
@@ -127,7 +127,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #endif
 #elif defined(BOARD_ESP32_DIV_V2)
 #ifndef ESP32DIV_BOARD_NAME
-#define ESP32DIV_BOARD_NAME "ESP32-DIV V2"
+#define ESP32DIV_BOARD_NAME "SHARKDIV"
 #endif
 #ifndef HAS_PCF8574_BUTTONS
 /*不使用物理按键*/

@@ -212,7 +212,7 @@ void drawFooter(int16_t width) {
     tft.drawPixel(ART_X + i, 300, wdEdge());
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(wdGrey(), TFT_BLACK);
-  tft.drawString("ESP32-DIV V2  //  BASE: CIFERTECH", width / 2, 310, 1);
+  tft.drawString("SHARKDIV  //  BASE: CIFERTECH", width / 2, 310, 1);
   tft.setTextDatum(TL_DATUM);
 }
 
