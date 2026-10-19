@@ -26,6 +26,11 @@ Based on the original [ESP32-DIV firmware by CiferTech](https://github.com/cifer
 
 Extras: ctOS-style Skull Rain boot animation, phosphor-green boot palette, 4 themes, touch-first UI (tap latching — no physical buttons needed), battery fuel gauge, SD-config settings, and a **remote-test serial console** (`u/d/l/r/k` tap, `s` state, `b` battery) so the whole device can be driven by automated tooling.
 
+## Flash from the browser
+
+**[sharkdiv web flasher](https://m5shark.github.io/SHARKDIV-firmware/)** —
+Chrome/Edge on desktop, connect the device, install. No tools needed.
+
 ## Building
 
 ```bash
