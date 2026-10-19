@@ -1,0 +1,15 @@
+{
+  "name": "SHARKDIV",
+  "version": "1.7.24",
+  "home_assistant_domain": null,
+  "funding_url": "https://m5shark.com",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "firmware/v1.7.24/full-16MB.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

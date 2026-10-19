@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SHARKDIV Web Flasher</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;
+         background:#000; color:#c6f6cf; display:flex; flex-direction:column;
+         align-items:center; padding:32px 16px; }
+  h1 { font-size:26px; letter-spacing:2px; color:#07E0; color:#00e676; margin:8px 0 2px; }
+  h1 b { color:#fff; }
+  .sub { color:#5e8f6e; margin-bottom:26px; }
+  .card { background:#06120a; border:1px solid #0f3d22; border-radius:12px;
+          padding:22px 26px; max-width:560px; width:100%; }
+  .steps { color:#9fd8b4; font-size:14px; }
+  .steps li { margin:7px 0; }
+  esp-web-install-button::part(button) {
+    width:100%; padding:14px; font-size:17px; font-weight:700;
+    color:#001b0a; background:#00e676; border:0; border-radius:9px;
+    cursor:pointer; margin-top:14px;
+  }
+  .warn { color:#ffd54f; font-size:13px; margin-top:14px; }
+  .foot { color:#3c5f47; font-size:12px; margin-top:22px; }
+  a { color:#00e676; }
+  code { background:#0b2415; padding:2px 6px; border-radius:5px; font-size:12px; }
+</style>
+</head>
+<body>
+  <h1>SHARK<b>DIV</b> WEB FLASHER</h1>
+  <div class="sub">v1.7.24 &middot; no installs, flashes straight from the browser</div>
+
+  <div class="card">
+    <ol class="steps">
+      <li>Use <b>Chrome or Edge</b> on desktop (the flasher needs Web&nbsp;Serial).</li>
+      <li>Connect SHARKDIV with a USB data cable. If the port doesn't appear:
+          hold <b>BOOT</b>, tap <b>RESET</b>, release <b>BOOT</b>.</li>
+      <li>Click <b>Connect</b>, pick the serial port, then <b>Install</b>.</li>
+      <li>Choose <b>_erase + install_</b> on a new device for a clean start.</li>
+    </ol>
+    <esp-web-install-button manifest="./manifest.json"></esp-web-install-button>
+    <div class="warn">If the browser flash fails on your USB bridge, flash over
+      USB with esptool instead — see
+      <a href="https://github.com/M5Shark/SHARKDIV-firmware/blob/main/FLASHING.md">FLASHING.md</a>.</div>
+    <div class="foot">Firmware: <a href="https://github.com/M5Shark/SHARKDIV-firmware">github.com/M5Shark/SHARKDIV-firmware</a> (MIT, based on CiferTech ESP32-DIV).
+    Full 16&nbsp;MB image — bootloader, partition table and app in one file.</div>
+  </div>
+
+  <script type="module"
+    src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+</body>
+</html>
