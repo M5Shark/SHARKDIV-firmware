@@ -118,6 +118,8 @@ You should see the green boot splash, then the main menu in the **Hacker** theme
 | Blank / white screen | TFT_eSPI `User_Setup.h` not applied — redo step 2. |
 | Garbled or wrong colours | Wrong driver/pins in `User_Setup.h` — use the one in this repo. |
 | Upload fails / times out | Set Upload Speed to **115200**; enter download mode (BOOT+RESET). |
+| Board switches off ~30 s into an upload, port disappears, red LED then goes dark | The IP5306 battery chip cuts power when the board draws little current (no firmware running = backlight off). **Unplug the battery** from the back and upload on USB power only, with a full erase; reconnect the battery afterwards. |
+| Won't turn on after an interrupted upload (red LED ~30 s, then off) | The firmware was only partly written. Same fix: battery unplugged, USB power only, erase + flash again (web flasher or esptool). |
 | Compile errors about `esp_wifi`/WiFi/NimBLE class names | You're on ESP32 core 3.x or NimBLE 2.x — use core **2.0.10** + **NimBLE 1.4.3**. |
 | Link error: *multiple definition of ieee80211_raw_frame_sanity_check* | Apply the `platform.local.txt` from step 3. |
 | `arduinoFFT` / `ArduinoFFT` compile errors | Use **arduinoFFT 1.5.5**, not 2.x. |
