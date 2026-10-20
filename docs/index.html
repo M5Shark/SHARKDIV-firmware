@@ -232,6 +232,13 @@ a { color: var(--accent); }
           </span>
         </label>
 
+        <label class="opt" id="logoRow" for="logoFirst" hidden>
+          <input type="checkbox" id="logoFirst" checked>
+          <span>Flash blank firmware first
+            <span class="opt-sub">Use this if the device isn't working — blank screen, or just a red light. It flashes a recovery image first, then the firmware.</span>
+          </span>
+        </label>
+
         <button class="go" id="go" type="button">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4.5 13H11l-1 9 8.5-11H12l1-9z"/></svg>
           <span id="goLabel">Connect &amp; Flash</span>
@@ -843,15 +850,23 @@ a { color: var(--accent); }
 <script type="module">
 import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.7.0/bundle.js";
 
-const FW_URL  = "firmware/v1.7.24/full-16MB.bin";
-const FW_ADDR = 0x0;
+const FW_URL    = "firmware/v1.7.24/full-16MB.bin";
+const FW_ADDR   = 0x0;
+const LOGO_URL  = "firmware/v1.7.24/logo.bin";  // optional splash — a full/merged image, flashed at 0x0
+const LOGO_ADDR = 0x0;
 
 const $ = (id) => document.getElementById(id);
 const go = $("go"), goLabel = $("goLabel"), eraseEl = $("erase");
+const logoRow = $("logoRow"), logoFirstEl = $("logoFirst");
 const progress = $("progress"), fill = $("fill"), pct = $("pct"), statusEl = $("status");
 const logEl = $("log"), logToggle = $("logtoggle"), notice = $("notice");
 
 let busy = false;
+let logoPresent = false;
+let resumeFw = null;   // holds the firmware bytes when step 2 is waiting for a manual reconnect
+
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function setStatus(msg, cls) {
   statusEl.className = "status" + (cls ? " " + cls : "");
@@ -863,7 +878,6 @@ function setProgress(written, total) {
   fill.style.width = (p * 100).toFixed(1) + "%";
   pct.textContent = (p * 100).toFixed(0) + "%";
 }
-function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 
 let logBuf = "";
 function log(text, inline) {
@@ -905,112 +919,201 @@ function boltEl() {
   svg.appendChild(p); return svg;
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 // Browser support gate
 if (!("serial" in navigator)) {
   go.disabled = true;
   showNotice("This browser can't flash over USB. Open this page in <b>Chrome</b> or <b>Edge</b> on a desktop computer (Web Serial isn't available on Firefox, Safari, or mobile).", true);
 }
 
+// Reveal the "logo first" option only when a logo image has actually been published.
+(async () => {
+  try {
+    const r = await fetch(LOGO_URL, { method: "HEAD", cache: "no-store" });
+    if (r.ok) { logoPresent = true; logoRow.hidden = false; }
+  } catch (_) { /* no logo published — the option stays hidden */ }
+})();
+
+async function fetchBin(url, label) {
+  const resp = await fetch(url, { cache: "no-store" });
+  if (!resp.ok) throw new Error("couldn't download " + label + " (" + resp.status + ")");
+  const u8 = new Uint8Array(await resp.arrayBuffer());
+  log(label + ": " + (u8.length / 1048576).toFixed(2) + " MB (" + u8.length + " bytes)");
+  return u8;
+}
+
+function makeLoader(transport) {
+  return new ESPLoader({
+    transport,
+    baudrate: 115200,      // this board's USB bridge is unreliable above 115200
+    romBaudrate: 115200,   // keep both equal so esptool-js never renegotiates baud
+    enableTracing: false,
+    debugLogging: false,
+    terminal: {
+      clean() {},
+      writeLine(d) { log(String(d)); },
+      write(d) { log(String(d), true); },
+    },
+  });
+}
+
+// Write one image. eraseAll wipes the whole chip first (we do that once, on the first write).
+async function writeImage(esploader, data, address, label, eraseAll) {
+  setStatus(label + (eraseAll ? " (erasing first)…" : "…") + " don't unplug.");
+  setProgress(0, 1); pct.textContent = "0%";
+  await esploader.writeFlash({
+    fileArray: [{ data, address }],
+    flashSize: "keep",   // keep each image's own bootloader header — never rewrite it
+    flashMode: "keep",
+    flashFreq: "keep",
+    eraseAll: !!eraseAll,
+    compress: false,     // FIX: uncompressed write avoids the 3s per-block decompress
+                         // timeout that stalls this board partway (the "stops at 30%" bug)
+    reportProgress: (i, written, total) => setProgress(written, total),
+  });
+  setProgress(1, 1);
+}
+
+function finishOk() {
+  setProgress(1, 1);
+  setStatus("Done — SHARKDIV is flashed. It'll reboot into the firmware now.", "ok");
+  SharkSea && SharkSea.frenzy(6);
+  const r = go.getBoundingClientRect();
+  SharkSea && SharkSea.burst(r.left + r.width / 2, r.top, 18);
+  resumeFw = null;
+  setBusy(false, "Flash again");
+}
+
+function fail(err) {
+  const msg = (err && err.message) ? err.message : String(err);
+  if (/No port selected|cancelled|The port selection|has to be a user gesture/i.test(msg)) {
+    setStatus("Cancelled — no port selected. Click to try again.");
+    progress.classList.remove("show");
+  } else {
+    setStatus("Flash failed. See below.", "err");
+    log("ERROR: " + msg);
+    showNotice(
+      "Flashing failed: <b>" + escapeHtml(msg) + "</b><br><br>" +
+      "Try this, in order: (1) unplug and replug with a <b>data</b> USB cable, " +
+      "(2) hold <b>BOOT</b>, tap <b>RESET</b>, release <b>BOOT</b> to force download mode, " +
+      "(3) tick <b>Erase flash first</b>, (4) close other apps using the port (Arduino IDE, serial monitors). " +
+      "Still stuck? Flash over USB with esptool — see " +
+      "<a href=\"https://github.com/M5Shark/SHARKDIV-firmware/blob/main/FLASHING.md\">FLASHING.md</a>.",
+      true
+    );
+  }
+  setBusy(false, resumeFw ? "Continue — flash firmware" : "Try again");
+}
+
 async function flash() {
   if (busy) return;
   notice.hidden = true;
   logBuf = ""; logEl.textContent = "";
+  resumeFw = null;
   setBusy(true, "Working…");
-  setProgress(0, 1);
-  pct.textContent = "";
+  setProgress(0, 1); pct.textContent = "";
 
+  const logoFirst = logoPresent && logoFirstEl && logoFirstEl.checked;
   let transport = null, esploader = null;
   try {
     setStatus("Downloading firmware…");
-    const resp = await fetch(FW_URL, { cache: "no-store" });
-    if (!resp.ok) throw new Error("couldn't download firmware (" + resp.status + ")");
-    const fw = new Uint8Array(await resp.arrayBuffer());
-    log("firmware: " + (fw.length / 1048576).toFixed(2) + " MB (" + fw.length + " bytes)");
+    const fw = await fetchBin(FW_URL, "firmware");
+    let logo = null;
+    if (logoFirst) { setStatus("Downloading blank firmware…"); logo = await fetchBin(LOGO_URL, "blank firmware"); }
 
     setStatus("Waiting for you to pick the serial port…");
     const port = await navigator.serial.requestPort();
-
     transport = new Transport(port, true);
-    esploader = new ESPLoader({
-      transport,
-      baudrate: 115200,      // this board's USB bridge is unreliable above 115200
-      romBaudrate: 115200,   // keep both equal so esptool-js never renegotiates baud
-      enableTracing: false,
-      debugLogging: false,
-      terminal: {
-        clean() {},
-        writeLine(d) { log(String(d)); },
-        write(d) { log(String(d), true); },
-      },
-    });
+    esploader = makeLoader(transport);
 
     setStatus("Connecting… if this hangs: hold BOOT, tap RESET, release BOOT, then retry.");
-    const chip = await esploader.main();
+    let chip = await esploader.main();
     log("connected: " + chip);
-    if (!/S3/i.test(String(chip))) {
-      log("note: expected an ESP32-S3; got \"" + chip + "\". Continuing anyway.");
-    }
+    if (!/S3/i.test(String(chip))) log("note: expected an ESP32-S3; got \"" + chip + "\". Continuing anyway.");
 
     SharkSea && SharkSea.setFlashing(true);
-    const r = go.getBoundingClientRect();
-    SharkSea && SharkSea.burst(r.left + r.width / 2, r.top + r.height / 2, 14);
+    const rb = go.getBoundingClientRect();
+    SharkSea && SharkSea.burst(rb.left + rb.width / 2, rb.top + rb.height / 2, 14);
 
-    if (eraseEl.checked) {
-      setStatus("Erasing flash… (a few seconds)");
-      log("erasing flash…");
+    const erase = eraseEl.checked;
+
+    if (logoFirst) {
+      // ---- Step 1: logo ----
+      await writeImage(esploader, logo, LOGO_ADDR, "Step 1 of 2 · writing blank firmware", erase);
+      setStatus("Blank firmware flashed — rebooting so the device lights up…");
+      await esploader.after("hard_reset");
+      await sleep(3500);  // let the logo render on the screen
+
+      // ---- re-sync for step 2 (the external bridge keeps the same port across reset) ----
+      setStatus("Reconnecting to flash the firmware…");
+      try {
+        chip = await esploader.main();
+        log("reconnected: " + chip);
+      } catch (e2) {
+        // Auto re-entry into download mode failed — hand off to a manual Continue step.
+        log("auto-reconnect failed: " + (e2 && e2.message ? e2.message : e2));
+        resumeFw = fw;
+        SharkSea && SharkSea.setFlashing(false);
+        setStatus("Logo is on the screen. Now put the device in download mode and continue.", "ok");
+        showNotice(
+          "Blank firmware flashed ✔ &mdash; your device should light up now.<br><br>" +
+          "To install the firmware: hold <b>BOOT</b>, tap <b>RESET</b>, release <b>BOOT</b>, " +
+          "then click <b>Continue — flash firmware</b> and pick the same port again.",
+          false
+        );
+        setBusy(false, "Continue — flash firmware");
+        return;  // the finally{} below still closes this port
+      }
+      // ---- Step 2: firmware (erase already happened in step 1 if requested) ----
+      await writeImage(esploader, fw, FW_ADDR, "Step 2 of 2 · writing firmware", false);
+    } else {
+      await writeImage(esploader, fw, FW_ADDR, "Writing firmware", erase);
     }
-    setStatus(eraseEl.checked ? "Erasing + writing firmware…" : "Writing firmware… don't unplug.");
 
-    await esploader.writeFlash({
-      fileArray: [{ data: fw, address: FW_ADDR }],
-      flashSize: "keep",   // keep the merged image's own bootloader header — never rewrite it
-      flashMode: "keep",
-      flashFreq: "keep",
-      eraseAll: eraseEl.checked,
-      compress: false,     // FIX: uncompressed write avoids the 3s per-block decompress
-                           // timeout that stalls this board partway (the "stops at 30%" bug)
-      reportProgress: (fileIndex, written, total) => setProgress(written, total),
-    });
-
-    setProgress(1, 1);
     setStatus("Rebooting the device…");
     await esploader.after("hard_reset");
-
-    setStatus("Done — SHARKDIV is flashed. It'll reboot into the firmware now.", "ok");
-    SharkSea && SharkSea.frenzy(6);
-    const r2 = go.getBoundingClientRect();
-    SharkSea && SharkSea.burst(r2.left + r2.width / 2, r2.top, 18);
-    setBusy(false, "Flash again");
+    finishOk();
   } catch (err) {
-    const msg = (err && err.message) ? err.message : String(err);
-    if (/No port selected|cancelled|The port selection/i.test(msg)) {
-      setStatus("Cancelled — no port selected. Click to try again.");
-      progress.classList.remove("show");
-    } else {
-      setStatus("Flash failed. See below.", "err");
-      log("ERROR: " + msg);
-      showNotice(
-        "Flashing failed: <b>" + escapeHtml(msg) + "</b><br><br>" +
-        "Try this, in order: (1) unplug and replug with a <b>data</b> USB cable, " +
-        "(2) hold <b>BOOT</b>, tap <b>RESET</b>, release <b>BOOT</b> to force download mode, " +
-        "(3) tick <b>Erase flash first</b>, (4) close other apps using the port (Arduino IDE, serial monitors). " +
-        "Still stuck? Flash over USB with esptool — see " +
-        "<a href=\"https://github.com/M5Shark/SHARKDIV-firmware/blob/main/FLASHING.md\">FLASHING.md</a>.",
-        true
-      );
-    }
-    setBusy(false, "Try again");
+    fail(err);
   } finally {
     SharkSea && SharkSea.setFlashing(false);
     if (transport) { try { await transport.disconnect(); } catch (_) {} }
   }
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Manual step 2: the logo has booted, the user re-entered download mode, now flash the firmware.
+async function resumeFirmware() {
+  if (busy || !resumeFw) return;
+  const fw = resumeFw;
+  notice.hidden = true;
+  setBusy(true, "Working…");
+  setProgress(0, 1); pct.textContent = "";
+  let transport = null, esploader = null;
+  try {
+    setStatus("Waiting for you to pick the serial port…");
+    const port = await navigator.serial.requestPort();
+    transport = new Transport(port, true);
+    esploader = makeLoader(transport);
+    setStatus("Connecting… if this hangs: hold BOOT, tap RESET, release BOOT, then retry.");
+    const chip = await esploader.main();
+    log("connected: " + chip);
+    SharkSea && SharkSea.setFlashing(true);
+    await writeImage(esploader, fw, FW_ADDR, "Writing firmware", eraseEl.checked);
+    setStatus("Rebooting the device…");
+    await esploader.after("hard_reset");
+    finishOk();
+  } catch (err) {
+    fail(err);  // keeps resumeFw set, so the button stays "Continue — flash firmware"
+  } finally {
+    SharkSea && SharkSea.setFlashing(false);
+    if (transport) { try { await transport.disconnect(); } catch (_) {} }
+  }
 }
 
-go.addEventListener("click", flash);
+go.addEventListener("click", () => (resumeFw ? resumeFirmware() : flash()));
 </script>
 </body>
 </html>
