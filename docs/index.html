@@ -1113,17 +1113,30 @@ if (!("serial" in navigator)) {
 (async () => {
   try {
     const r = await fetch(LOGO_URL, { method: "HEAD", cache: "no-store" });
-    if (r.ok) { logoPresent = true; logoRow.hidden = false; }
+    if (r.ok) { logoPresent = true; logoRow.hidden = false; getBin(LOGO_URL, "blank firmware").catch(() => {}); }
   } catch (_) { /* no logo published — the option stays hidden */ }
 })();
 
 async function fetchBin(url, label) {
   const resp = await fetch(url, { cache: "no-store" });
   if (!resp.ok) throw new Error("couldn't download " + label + " (" + resp.status + ")");
-  const u8 = new Uint8Array(await resp.arrayBuffer());
+  return new Uint8Array(await resp.arrayBuffer());
+}
+
+// Chrome only lets requestPort() open the port picker for ~5 s after the click, so nothing slow
+// may run between the click and requestPort(). The images are downloaded ahead of time instead
+// (a failed prefetch is simply retried after the port has been picked).
+const bins = {};
+function getBin(url, label) {
+  if (!bins[url]) bins[url] = fetchBin(url, label).catch((e) => { delete bins[url]; throw e; });
+  return bins[url];
+}
+async function loadBin(url, label) {
+  const u8 = await getBin(url, label);
   log(label + ": " + (u8.length / 1048576).toFixed(2) + " MB (" + u8.length + " bytes)");
   return u8;
 }
+getBin(FW_URL, "firmware").catch(() => {});
 
 function makeLoader(transport) {
   return new ESPLoader({
@@ -1210,10 +1223,15 @@ function fail(err) {
   const msg = (err && err.message) ? err.message : String(err);
   const midWrite = writing;
   writing = false;
-  if (/No port selected|cancelled|The port selection|has to be a user gesture/i.test(msg)) {
+  if (/No port selected|cancelled|The port selection/i.test(msg)) {
     setStatus("Cancelled — no port selected. Click to try again.");
     barSet("idle");
     progress.classList.remove("show");
+  } else if (/user gesture/i.test(msg)) {
+    // the browser refused to open the port picker; a fresh click always works
+    barSet("idle");
+    progress.classList.remove("show");
+    showNotice("The browser didn't open the port picker. Click <b>Connect &amp; Flash</b> again.", false);
   } else if (midWrite) {
     // The port vanished or stopped answering while writing: on this board that is the
     // battery chip cutting power, so point straight at the USB-only recovery steps.
@@ -1257,13 +1275,15 @@ async function flash() {
   const logoFirst = logoPresent && logoFirstEl && logoFirstEl.checked;
   let transport = null, esploader = null;
   try {
-    setStatus("Downloading firmware…");
-    const fw = await fetchBin(FW_URL, "firmware");
-    let logo = null;
-    if (logoFirst) { setStatus("Downloading blank firmware…"); logo = await fetchBin(LOGO_URL, "blank firmware"); }
-
+    // requestPort() has to be the first await: it needs the click's user activation
     setStatus("Waiting for you to pick the serial port…");
     const port = await navigator.serial.requestPort();
+
+    setStatus("Downloading firmware…");
+    const fw = await loadBin(FW_URL, "firmware");
+    let logo = null;
+    if (logoFirst) { setStatus("Downloading blank firmware…"); logo = await loadBin(LOGO_URL, "blank firmware"); }
+
     transport = new Transport(port, true);
     esploader = makeLoader(transport);
 
