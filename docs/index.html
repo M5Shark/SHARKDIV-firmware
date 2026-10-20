@@ -192,6 +192,21 @@ h1 b { font-weight: 600; color: var(--accent); }
 .notice.hard { background: rgba(255,107,107,0.08); border-color: rgba(255,107,107,0.28); color: var(--bad); }
 .notice a { color: inherit; }
 
+.help { border-radius: 10px; border: 1px solid var(--glass-line); background: var(--chip); }
+.help summary {
+  cursor: pointer; list-style: none; padding: 10px 12px;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 13px; font-weight: 500; color: var(--ink-soft);
+}
+.help summary::-webkit-details-marker { display: none; }
+.help summary::after { content: "+"; font: 500 14px/1 var(--mono); color: var(--muted); }
+.help[open] summary::after { content: "\2013"; }
+.help summary:hover { color: var(--ink); }
+.help p { margin: 0; padding: 0 13px 6px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.help ol { margin: 0; padding: 2px 14px 12px 32px; font-size: 12.5px; line-height: 1.5; color: var(--ink-soft); }
+.help li { margin: 5px 0; }
+.help b { color: var(--ink); font-weight: 600; }
+
 .foot { font-size: 11.5px; line-height: 1.6; color: var(--muted); text-align: center; }
 .foot a { color: var(--ink-soft); text-decoration: none; }
 .foot a:hover { color: var(--accent); }
@@ -220,8 +235,8 @@ a { color: var(--accent); }
       <div class="panel">
         <ol class="steps">
           <li>Use <b>Chrome</b> or <b>Edge</b> on desktop — the flasher needs Web&nbsp;Serial.</li>
-          <li>Connect SHARKDIV with a <b>USB data cable</b> (not charge-only).</li>
-          <li>Click <b>Connect &amp; Flash</b>, pick the serial port, and wait.</li>
+          <li>Connect SHARKDIV with a <b>USB data cable</b> (not charge-only) and switch it on.</li>
+          <li>Click <b>Connect &amp; Flash</b>, pick the serial port, and wait. The screen lights up while it flashes — that keeps the board powered.</li>
           <li>If it hangs on connect: hold <span class="kbd">BOOT</span>, tap <span class="kbd">RESET</span>, release <span class="kbd">BOOT</span>, then retry.</li>
         </ol>
 
@@ -254,9 +269,20 @@ a { color: var(--accent); }
 
         <div class="notice" id="notice" hidden></div>
 
+        <details class="help" id="powerHelp">
+          <summary>Switches off mid-flash, or won't turn on?</summary>
+          <p>The board's battery chip turns it off after about 30&nbsp;seconds when it draws very little power — which is exactly what happens during flashing, or after a flash was cut short. Flashing on USB power alone avoids it:</p>
+          <ol>
+            <li><b>Unplug the battery</b> connector from the back of the board.</li>
+            <li>Plug the <b>USB data cable</b> into the computer. The board now runs from USB and stays on.</li>
+            <li>Tick <b>Erase flash first</b>, then click <b>Connect &amp; Flash</b>. If no port shows up, hold <span class="kbd">BOOT</span>, tap <span class="kbd">RESET</span>, release <span class="kbd">BOOT</span>.</li>
+            <li>When it says <b>Done</b>, unplug USB, reconnect the battery and switch the board on.</li>
+          </ol>
+        </details>
+
         <div class="foot">
           Full 16&nbsp;MB image — bootloader, partition table and app in one file. Flashing takes
-          2–3&nbsp;minutes at 115200&nbsp;baud; don't unplug.<br>
+          1–2&nbsp;minutes at 115200&nbsp;baud; don't unplug.<br>
           Trouble? Flash over USB with esptool — see
           <a href="https://github.com/M5Shark/SHARKDIV-firmware/blob/main/FLASHING.md">FLASHING.md</a>.
           Firmware: <a href="https://github.com/M5Shark/SHARKDIV-firmware">github.com/M5Shark/SHARKDIV-firmware</a>
@@ -859,11 +885,13 @@ const $ = (id) => document.getElementById(id);
 const go = $("go"), goLabel = $("goLabel"), eraseEl = $("erase");
 const logoRow = $("logoRow"), logoFirstEl = $("logoFirst");
 const progress = $("progress"), fill = $("fill"), pct = $("pct"), statusEl = $("status");
-const logEl = $("log"), logToggle = $("logtoggle"), notice = $("notice");
+const logEl = $("log"), logToggle = $("logtoggle"), notice = $("notice"), powerHelp = $("powerHelp");
 
 let busy = false;
 let logoPresent = false;
 let resumeFw = null;   // holds the firmware bytes when step 2 is waiting for a manual reconnect
+let writing = false;   // true while bytes are going to flash, so a drop-out can be reported as power loss
+let lastPct = 0;
 
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -960,20 +988,59 @@ function makeLoader(transport) {
   });
 }
 
+// The board's IP5306 battery chip switches the power off when the load stays under ~45 mA for
+// ~32 s — exactly the state while flashing (no firmware running, backlight off). Driving the
+// backlight pin (GPIO46) high from the flasher stub adds enough load to keep the board powered.
+// ESP32-S3 registers, from ESP-IDF soc/esp32s3 gpio_reg.h / io_mux_reg.h. Every connect (main())
+// pulses EN, which resets the pin, so this has to run again after each main().
+const S3_IO_MUX_GPIO46  = 0x600090BC;  // MCU_SEL in bits 14:12
+const S3_FUNC46_OUT_SEL = 0x6000460C;  // 0x100 = SIG_GPIO_OUT_IDX (plain GPIO output)
+const S3_OUT1_W1TS      = 0x60004014;  // write-1-to-set, GPIO32..53
+const S3_ENABLE1_W1TS   = 0x60004030;
+const GPIO46_BIT        = 1 << (46 - 32);
+
+async function keepBoardPowered(esploader) {
+  if (!esploader.chip || esploader.chip.CHIP_NAME !== "ESP32-S3") return;
+  try {
+    const mux = (await esploader.readReg(S3_IO_MUX_GPIO46)) >>> 0;
+    if ((mux & 0xFFFF0000) === 0) {  // skip if the read came back garbled
+      await esploader.writeReg(S3_IO_MUX_GPIO46, ((mux & ~0x7000) | 0x1000) >>> 0);
+    }
+    await esploader.writeReg(S3_FUNC46_OUT_SEL, 0x100);
+    await esploader.writeReg(S3_OUT1_W1TS, GPIO46_BIT);     // level high first…
+    await esploader.writeReg(S3_ENABLE1_W1TS, GPIO46_BIT);  // …then enable the driver
+    log("backlight on to keep the board powered (io_mux46 was 0x" + mux.toString(16) + ")");
+  } catch (e) {
+    log("note: couldn't switch the backlight on: " + (e && e.message ? e.message : e));
+  }
+}
+
+// esptool-js 0.7.0's after("hard_reset") never pulls EN low on a DTR/RTS bridge (it only releases
+// RTS and re-sends a stale DTR=1), so the board would stay in the bootloader. Pulse EN ourselves
+// with GPIO0 released so it boots the firmware.
+async function rebootIntoFirmware(esploader) {
+  await esploader.after("custom_reset", undefined, "D0|R1|W100|R0");
+}
+
 // Write one image. eraseAll wipes the whole chip first (we do that once, on the first write).
 async function writeImage(esploader, data, address, label, eraseAll) {
   setStatus(label + (eraseAll ? " (erasing first)…" : "…") + " don't unplug.");
   setProgress(0, 1); pct.textContent = "0%";
+  writing = true; lastPct = 0;
   await esploader.writeFlash({
     fileArray: [{ data, address }],
     flashSize: "keep",   // keep each image's own bootloader header — never rewrite it
     flashMode: "keep",
     flashFreq: "keep",
     eraseAll: !!eraseAll,
-    compress: false,     // FIX: uncompressed write avoids the 3s per-block decompress
-                         // timeout that stalls this board partway (the "stops at 30%" bug)
-    reportProgress: (i, written, total) => setProgress(written, total),
+    compress: true,      // shortest time on the wire: the "stops at 30%" reports were the board
+                         // losing power ~30 s in (IP5306 light-load cut-off), not compression
+    reportProgress: (i, written, total) => {
+      setProgress(written, total);
+      lastPct = total > 0 ? Math.round((written / total) * 100) : 0;
+    },
   });
+  writing = false;
   setProgress(1, 1);
 }
 
@@ -989,17 +1056,33 @@ function finishOk() {
 
 function fail(err) {
   const msg = (err && err.message) ? err.message : String(err);
+  const midWrite = writing;
+  writing = false;
   if (/No port selected|cancelled|The port selection|has to be a user gesture/i.test(msg)) {
     setStatus("Cancelled — no port selected. Click to try again.");
     progress.classList.remove("show");
+  } else if (midWrite) {
+    // The port vanished or stopped answering while writing: on this board that is the
+    // battery chip cutting power, so point straight at the USB-only recovery steps.
+    setStatus("Stopped at " + lastPct + "% — the board lost power.", "err");
+    log("ERROR during write at " + lastPct + "%: " + msg);
+    showNotice(
+      "The flash stopped at <b>" + lastPct + "%</b> because the board <b>switched itself off</b> — " +
+      "its battery chip powers down when the board draws very little current.<br><br>" +
+      "Fix: <b>unplug the battery</b> from the back, plug USB back in, tick <b>Erase flash first</b> and flash again. " +
+      "Full steps are under <b>Switches off mid-flash</b> below.",
+      true
+    );
+    powerHelp.open = true;
   } else {
     setStatus("Flash failed. See below.", "err");
     log("ERROR: " + msg);
     showNotice(
       "Flashing failed: <b>" + escapeHtml(msg) + "</b><br><br>" +
-      "Try this, in order: (1) unplug and replug with a <b>data</b> USB cable, " +
-      "(2) hold <b>BOOT</b>, tap <b>RESET</b>, release <b>BOOT</b> to force download mode, " +
-      "(3) tick <b>Erase flash first</b>, (4) close other apps using the port (Arduino IDE, serial monitors). " +
+      "Try this, in order: (1) if the board is off or keeps switching off, <b>unplug the battery</b> and flash on USB power only, " +
+      "(2) unplug and replug with a <b>data</b> USB cable, " +
+      "(3) hold <b>BOOT</b>, tap <b>RESET</b>, release <b>BOOT</b> to force download mode, " +
+      "(4) close other apps using the port (Arduino IDE, serial monitors). " +
       "Still stuck? Flash over USB with esptool — see " +
       "<a href=\"https://github.com/M5Shark/SHARKDIV-firmware/blob/main/FLASHING.md\">FLASHING.md</a>.",
       true
@@ -1033,6 +1116,7 @@ async function flash() {
     let chip = await esploader.main();
     log("connected: " + chip);
     if (!/S3/i.test(String(chip))) log("note: expected an ESP32-S3; got \"" + chip + "\". Continuing anyway.");
+    await keepBoardPowered(esploader);
 
     SharkSea && SharkSea.setFlashing(true);
     const rb = go.getBoundingClientRect();
@@ -1044,7 +1128,7 @@ async function flash() {
       // ---- Step 1: logo ----
       await writeImage(esploader, logo, LOGO_ADDR, "Step 1 of 2 · writing blank firmware", erase);
       setStatus("Blank firmware flashed — rebooting so the device lights up…");
-      await esploader.after("hard_reset");
+      await rebootIntoFirmware(esploader);
       await sleep(3500);  // let the logo render on the screen
 
       // ---- re-sync for step 2 (the external bridge keeps the same port across reset) ----
@@ -1052,6 +1136,7 @@ async function flash() {
       try {
         chip = await esploader.main();
         log("reconnected: " + chip);
+        await keepBoardPowered(esploader);
       } catch (e2) {
         // Auto re-entry into download mode failed — hand off to a manual Continue step.
         log("auto-reconnect failed: " + (e2 && e2.message ? e2.message : e2));
@@ -1074,7 +1159,7 @@ async function flash() {
     }
 
     setStatus("Rebooting the device…");
-    await esploader.after("hard_reset");
+    await rebootIntoFirmware(esploader);
     finishOk();
   } catch (err) {
     fail(err);
@@ -1100,10 +1185,11 @@ async function resumeFirmware() {
     setStatus("Connecting… if this hangs: hold BOOT, tap RESET, release BOOT, then retry.");
     const chip = await esploader.main();
     log("connected: " + chip);
+    await keepBoardPowered(esploader);
     SharkSea && SharkSea.setFlashing(true);
     await writeImage(esploader, fw, FW_ADDR, "Writing firmware", eraseEl.checked);
     setStatus("Rebooting the device…");
-    await esploader.after("hard_reset");
+    await rebootIntoFirmware(esploader);
     finishOk();
   } catch (err) {
     fail(err);  // keeps resumeFw set, so the button stays "Continue — flash firmware"
