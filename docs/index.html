@@ -36,6 +36,7 @@
   box-sizing: border-box;
 }
 *, *::before, *::after { box-sizing: inherit; }
+[hidden] { display: none !important; }  /* .opt / .notice set display, which would otherwise beat the attribute */
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -128,6 +129,7 @@ h1 b { font-weight: 600; color: var(--accent); }
 .opt .opt-sub { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
 
 .go {
+  position: relative; overflow: hidden; isolation: isolate;
   width: 100%; min-height: 50px; padding: 14px;
   display: inline-flex; align-items: center; justify-content: center; gap: 9px;
   border: 0; border-radius: 11px; cursor: pointer;
@@ -135,30 +137,45 @@ h1 b { font-weight: 600; color: var(--accent); }
   color: #001b0a; background: var(--accent);
   transition: filter 0.15s, transform 0.12s, opacity 0.15s;
 }
+.go > * { position: relative; z-index: 1; }
+/* ASCII glint that sweeps across the idle button every few seconds */
+.go::after {
+  content: "/ // /";
+  position: absolute; z-index: 0; top: 50%; left: -110px;
+  transform: translateY(-50%);
+  font: 700 28px/1 var(--mono); letter-spacing: -4px; white-space: pre;
+  color: rgba(255, 255, 255, 0.5);
+  pointer-events: none;
+  animation: glint 6s ease-in-out 1.5s infinite;
+}
+@keyframes glint { 0%, 74% { left: -110px; } 100% { left: calc(100% + 30px); } }
+.go:disabled::after { display: none; }
 .go:not(:disabled):hover { filter: brightness(1.07); }
 .go:not(:disabled):active { transform: scale(0.985); }
 .go:disabled { cursor: default; opacity: 0.55; }
+.go.busy:disabled { opacity: 0.85; }
 .go svg { flex: none; }
-.spinner {
-  width: 16px; height: 16px; border-radius: 50%;
-  border: 2px solid rgba(0,27,10,0.35); border-top-color: #001b0a;
-  animation: spin 0.7s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
+#goLabel { display: inline-block; white-space: nowrap; overflow: hidden; text-align: center; }
+.aspin { flex: none; display: inline-block; width: 3ch; font: 700 15px/1 var(--mono); white-space: pre; text-align: left; }
 
 .progress { display: none; flex-direction: column; gap: 8px; }
 .progress.show { display: flex; }
-.track {
-  position: relative; height: 10px; border-radius: 6px;
-  background: rgba(110,240,160,0.10); overflow: hidden;
-  border: 1px solid var(--glass-line);
+/* ASCII progress: a shark fin cutting along a two-row water line */
+.atrack {
+  padding: 5px 10px 6px; border-radius: 9px;
+  background: #040b07; border: 1px solid var(--glass-line);
+  font: 500 13px/1.2 var(--mono); white-space: pre; overflow: hidden;
+  user-select: none;
 }
-.fill {
-  position: absolute; inset: 0; width: 0%;
-  background: linear-gradient(90deg, var(--glow), var(--accent));
-  box-shadow: 0 0 14px -2px var(--accent);
-  transition: width 0.25s ease;
-}
+.arow { display: block; height: 1.2em; }
+.a-w  { color: var(--accent); }
+.a-w2 { color: #23a05a; }
+.a-f  { color: var(--ink); text-shadow: 0 0 6px rgba(80, 230, 140, 0.55); }
+.a-p  { color: #3d5246; }
+.a-s  { color: rgba(140, 240, 180, 0.6); }
+.atrack.err .a-w, .atrack.err .a-w2, .atrack.err .a-f, .atrack.err .a-s { color: var(--bad); text-shadow: none; }
+.progress.err .pct { color: var(--bad); }
+@media (prefers-reduced-motion: reduce) { .go::after { display: none; } }
 .pmeta {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   font: 400 12px/1.4 var(--mono); color: var(--ink-soft);
@@ -260,7 +277,7 @@ a { color: var(--accent); }
         </button>
 
         <div class="progress" id="progress">
-          <div class="track"><div class="fill" id="fill"></div></div>
+          <div class="atrack" id="atrack" role="progressbar" aria-label="Flash progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="arow" id="aRow0" aria-hidden="true"></span><span class="arow" id="aRow1" aria-hidden="true"></span></div>
           <div class="pmeta"><span class="status" id="status">Ready.</span><span class="pct" id="pct"></span></div>
         </div>
 
@@ -884,7 +901,9 @@ const LOGO_ADDR = 0x0;
 const $ = (id) => document.getElementById(id);
 const go = $("go"), goLabel = $("goLabel"), eraseEl = $("erase");
 const logoRow = $("logoRow"), logoFirstEl = $("logoFirst");
-const progress = $("progress"), fill = $("fill"), pct = $("pct"), statusEl = $("status");
+const progress = $("progress"), pct = $("pct"), statusEl = $("status");
+const atrack = $("atrack"), aRow0 = $("aRow0"), aRow1 = $("aRow1");
+const still = matchMedia("(prefers-reduced-motion: reduce)");
 const logEl = $("log"), logToggle = $("logtoggle"), notice = $("notice"), powerHelp = $("powerHelp");
 
 let busy = false;
@@ -903,9 +922,105 @@ function setStatus(msg, cls) {
 }
 function setProgress(written, total) {
   const p = total > 0 ? clamp(written / total, 0, 1) : 0;
-  fill.style.width = (p * 100).toFixed(1) + "%";
+  barSet("progress", p);
   pct.textContent = (p * 100).toFixed(0) + "%";
 }
+
+// ---- ASCII progress bar: a fin cuts along the water line, water fills in behind it ----
+// modes: "scan" (busy, no % yet — the fin patrols), "progress", "ok", "err" (frozen, red), "idle" (static)
+const bar = { mode: "idle", p: 0, t: 0, timer: 0, charW: 0 };
+const FIN_W = 3;
+const FIN_R = ["|\\ ", "| \\"];   //  |\    swimming right
+const FIN_L = [" /|", "/ |"];     //  | \
+const WAVE = "_.-~";
+
+function h01(i, k) {
+  let h = Math.imul(i + 0x9e37, 2654435761) ^ Math.imul(k | 0, 1597334677);
+  h ^= h >>> 15; h = Math.imul(h, 2246822519); h ^= h >>> 13;
+  return (h >>> 0) / 4294967296;
+}
+function barCols() {
+  if (!bar.charW) {
+    const probe = document.createElement("span");
+    probe.textContent = "0000000000";
+    probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+    atrack.appendChild(probe);
+    bar.charW = probe.getBoundingClientRect().width / 10;
+    probe.remove();
+  }
+  const cs = getComputedStyle(atrack);
+  const inner = atrack.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  return bar.charW > 0 ? Math.max(12, Math.floor(inner / bar.charW)) : 40;
+}
+function runsHtml(ch, cls) {
+  let out = "", cur = null, buf = "";
+  const flush = () => { if (buf) out += '<span class="' + cur + '">' + buf.replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</span>"; };
+  for (let i = 0; i < ch.length; i++) {
+    if (cls[i] !== cur) { flush(); cur = cls[i]; buf = ""; }
+    buf += ch[i];
+  }
+  flush();
+  return out;
+}
+function renderBar() {
+  if (!progress.classList.contains("show") || !atrack.clientWidth) return;
+  const cols = barCols(), t = bar.t, calm = still.matches || bar.mode === "err" || bar.mode === "idle";
+  const span = Math.max(1, cols - FIN_W);
+  let x, dir = 1;
+  if (bar.mode === "scan") {
+    x = calm ? 0 : Math.round((Math.sin(t * 1.4) * 0.5 + 0.5) * span);
+    dir = calm || Math.cos(t * 1.4) >= 0 ? 1 : -1;
+  } else {
+    x = Math.round(clamp(bar.p, 0, 1) * span);
+  }
+  const c0 = new Array(cols).fill(" "), k0 = new Array(cols).fill("a-s");
+  const c1 = new Array(cols), k1 = new Array(cols);
+  for (let i = 0; i < cols; i++) {
+    // water fills behind the fin; while scanning there's only a short wake
+    const water = bar.mode === "scan"
+      ? (dir > 0 ? i < x && i >= x - 5 : i >= x + FIN_W && i < x + FIN_W + 5)
+      : i < x;
+    if (water) {
+      const v = calm ? 0.4 : Math.sin(i * 0.55 - t * 5) * 0.65 + Math.sin(i * 1.7 + t * 2.1) * 0.35;
+      const lv = clamp(Math.floor((v + 1) * 2), 0, 3);
+      c1[i] = WAVE[lv]; k1[i] = lv >= 2 ? "a-w" : "a-w2";
+    } else {
+      // plankton ahead of the fin, twinkling like the sea behind the card
+      const h = h01(i, 7), on = calm || Math.sin(t * 1.7 + h * 40) > -0.4;
+      c1[i] = h < 0.62 || !on ? " " : "·.'-·"[Math.floor(h * 97) % 5];
+      k1[i] = "a-p";
+    }
+  }
+  // spray kicked up just behind the fin while it moves
+  if (!calm && bar.mode !== "ok") {
+    const frame = Math.floor(t * 9);
+    for (let d = 1; d <= 3; d++) {
+      const i = dir > 0 ? x - d : x + FIN_W - 1 + d;
+      if (i >= 0 && i < cols && h01(i, frame) > 0.55) c0[i] = ".,'`"[Math.floor(h01(i, frame + 3) * 4)];
+    }
+  }
+  const F = dir > 0 ? FIN_R : FIN_L;
+  for (let j = 0; j < FIN_W && x + j < cols; j++) {
+    c0[x + j] = F[0][j]; k0[x + j] = "a-f";
+    c1[x + j] = F[1][j]; k1[x + j] = "a-f";
+  }
+  aRow0.innerHTML = runsHtml(c0, k0);
+  aRow1.innerHTML = runsHtml(c1, k1);
+}
+function barSet(mode, p) {
+  bar.mode = mode;
+  if (p != null) bar.p = p;
+  atrack.classList.toggle("err", mode === "err");
+  progress.classList.toggle("err", mode === "err");
+  atrack.setAttribute("aria-valuenow", String(Math.round(bar.p * 100)));
+  if (mode === "scan") atrack.setAttribute("aria-valuetext", "working"); else atrack.removeAttribute("aria-valuetext");
+  const animate = !still.matches && (mode === "scan" || mode === "progress" || mode === "ok");
+  if (animate && !bar.timer) bar.timer = setInterval(() => { bar.t += 0.066; renderBar(); }, 66);
+  if (!animate && bar.timer) { clearInterval(bar.timer); bar.timer = 0; }
+  renderBar();
+}
+window.addEventListener("resize", () => renderBar());
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { bar.charW = 0; renderBar(); });
 
 let logBuf = "";
 function log(text, inline) {
@@ -926,15 +1041,49 @@ function showNotice(msg, hard) {
   notice.innerHTML = msg;
 }
 
+// ---- button: the label decodes out of ASCII glyphs, and a bubble spinner runs while busy ----
+const GLYPHS = ".':;otSX%8@#";
+let labelText = "Connect & Flash", decodeTimer = 0;
+function setLabel(text) {
+  labelText = text;
+  go.setAttribute("aria-label", text);
+  clearInterval(decodeTimer);
+  goLabel.style.width = "";
+  goLabel.textContent = text;
+  if (still.matches) return;
+  goLabel.style.width = Math.ceil(goLabel.getBoundingClientRect().width) + "px";  // no jitter while glyphs flip
+  const chars = Array.from(text);
+  let f = 0;
+  decodeTimer = setInterval(() => {
+    const settled = Math.floor((++f * chars.length) / 14);  // resolves left to right in ~0.4 s
+    goLabel.textContent = chars.map((c, i) =>
+      i < settled || c === " " ? c : GLYPHS[(Math.random() * GLYPHS.length) | 0]).join("");
+    if (settled >= chars.length) { clearInterval(decodeTimer); goLabel.textContent = text; goLabel.style.width = ""; }
+  }, 28);
+}
+go.addEventListener("pointerenter", () => { if (!go.disabled) setLabel(labelText); });
+go.addEventListener("focus", () => { if (!go.disabled) setLabel(labelText); });
+
+const BUBBLES = ["   ", ".  ", "o. ", "Oo.", "°Oo", " °O", "  °"];
+let spinTimer = 0;
 function setBusy(b, label) {
   busy = b;
   go.disabled = b;
-  goLabel.textContent = label || "Connect & Flash";
-  const icon = go.querySelector("svg, .spinner");
-  if (b) { if (icon) icon.replaceWith(spinnerEl()); }
-  else { const sp = go.querySelector(".spinner"); if (sp) sp.replaceWith(boltEl()); }
+  go.classList.toggle("busy", b);
+  setLabel(label || "Connect & Flash");
+  clearInterval(spinTimer); spinTimer = 0;
+  const icon = go.querySelector("svg, .aspin");
+  if (b) {
+    const sp = icon && icon.classList.contains("aspin") ? icon : spinnerEl();
+    if (sp !== icon && icon) icon.replaceWith(sp);
+    let i = 1;
+    sp.textContent = BUBBLES[i];
+    if (!still.matches) spinTimer = setInterval(() => { sp.textContent = BUBBLES[i = (i + 1) % BUBBLES.length]; }, 110);
+  } else if (icon && icon.classList.contains("aspin")) {
+    icon.replaceWith(boltEl());
+  }
 }
-function spinnerEl() { const d = document.createElement("span"); d.className = "spinner"; return d; }
+function spinnerEl() { const s = document.createElement("span"); s.className = "aspin"; s.setAttribute("aria-hidden", "true"); return s; }
 function boltEl() {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
@@ -1025,7 +1174,7 @@ async function rebootIntoFirmware(esploader) {
 // Write one image. eraseAll wipes the whole chip first (we do that once, on the first write).
 async function writeImage(esploader, data, address, label, eraseAll) {
   setStatus(label + (eraseAll ? " (erasing first)…" : "…") + " don't unplug.");
-  setProgress(0, 1); pct.textContent = "0%";
+  barSet("scan", 0); pct.textContent = "0%";
   writing = true; lastPct = 0;
   await esploader.writeFlash({
     fileArray: [{ data, address }],
@@ -1036,7 +1185,7 @@ async function writeImage(esploader, data, address, label, eraseAll) {
     compress: true,      // shortest time on the wire: the "stops at 30%" reports were the board
                          // losing power ~30 s in (IP5306 light-load cut-off), not compression
     reportProgress: (i, written, total) => {
-      setProgress(written, total);
+      if (written > 0) setProgress(written, total);
       lastPct = total > 0 ? Math.round((written / total) * 100) : 0;
     },
   });
@@ -1045,7 +1194,7 @@ async function writeImage(esploader, data, address, label, eraseAll) {
 }
 
 function finishOk() {
-  setProgress(1, 1);
+  barSet("ok", 1); pct.textContent = "100%";
   setStatus("Done — SHARKDIV is flashed. It'll reboot into the firmware now.", "ok");
   SharkSea && SharkSea.frenzy(6);
   const r = go.getBoundingClientRect();
@@ -1060,10 +1209,12 @@ function fail(err) {
   writing = false;
   if (/No port selected|cancelled|The port selection|has to be a user gesture/i.test(msg)) {
     setStatus("Cancelled — no port selected. Click to try again.");
+    barSet("idle");
     progress.classList.remove("show");
   } else if (midWrite) {
     // The port vanished or stopped answering while writing: on this board that is the
     // battery chip cutting power, so point straight at the USB-only recovery steps.
+    barSet("err");
     setStatus("Stopped at " + lastPct + "% — the board lost power.", "err");
     log("ERROR during write at " + lastPct + "%: " + msg);
     showNotice(
@@ -1075,6 +1226,7 @@ function fail(err) {
     );
     powerHelp.open = true;
   } else {
+    barSet("err");
     setStatus("Flash failed. See below.", "err");
     log("ERROR: " + msg);
     showNotice(
@@ -1097,7 +1249,7 @@ async function flash() {
   logBuf = ""; logEl.textContent = "";
   resumeFw = null;
   setBusy(true, "Working…");
-  setProgress(0, 1); pct.textContent = "";
+  barSet("scan", 0); pct.textContent = "";
 
   const logoFirst = logoPresent && logoFirstEl && logoFirstEl.checked;
   let transport = null, esploader = null;
@@ -1149,6 +1301,7 @@ async function flash() {
           "then click <b>Continue — flash firmware</b> and pick the same port again.",
           false
         );
+        barSet("idle", 1);
         setBusy(false, "Continue — flash firmware");
         return;  // the finally{} below still closes this port
       }
@@ -1175,7 +1328,7 @@ async function resumeFirmware() {
   const fw = resumeFw;
   notice.hidden = true;
   setBusy(true, "Working…");
-  setProgress(0, 1); pct.textContent = "";
+  barSet("scan", 0); pct.textContent = "";
   let transport = null, esploader = null;
   try {
     setStatus("Waiting for you to pick the serial port…");
