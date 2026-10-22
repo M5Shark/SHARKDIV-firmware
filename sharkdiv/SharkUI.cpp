@@ -52,34 +52,37 @@ static void wdCornerTicks(int16_t x, int16_t y, int16_t w, int16_t h,
 
 // ── ctOS menu tile ─────────────────────────────────────────────────────
 void drawSharkTile(int16_t x, int16_t y, int16_t w, int16_t h, bool selected) {
+  const int16_t r = 7;
   tft.startWrite();
-  tft.fillRect(x, y, w, h, UI.fg);
+  // Clear the bounding box first so the rounded-corner gaps never keep a stale
+  // fill when the selection moves between tiles.
+  tft.fillRect(x, y, w, h, UI_BG);
   if (selected) {
-    // Focused card: a 2 px accent frame, a solid leading accent rail and the
-    // ctOS corner ticks — one unmistakable focus mark that reads at arm's
-    // length instead of a single hairline.
-    tft.drawRect(x, y, w, h, UI.icon);
-    tft.drawRect(x + 1, y + 1, w - 2, h - 2, UI.icon);
-    tft.fillRect(x, y, 3, h, UI.icon);
-    wdCornerTicks(x + 3, y, w - 3, h, 5, UI.accent);
+    // Focused tile: a solid accent card. The caller draws the icon and label
+    // in ink on top, so the selection reads as a filled block — not a hairline.
+    tft.fillRoundRect(x, y, w, h, r, UI.icon);
   } else {
-    // Resting card: a quiet hairline frame so the focused tile is the only
-    // thing competing for the eye.
-    tft.drawRect(x, y, w, h, UI.line);
+    // Resting tile: an elevated dark surface with a hairline rounded border.
+    tft.fillRoundRect(x, y, w, h, r, UI.fg);
+    tft.drawRoundRect(x, y, w, h, r, UI.line);
   }
   tft.endWrite();
 }
 
 // List rows (submenus): selected row gets a leading accent rail.
+// List rows are full-width rounded surfaces: the focused row is a filled accent
+// bar (caller draws its label in ink), resting rows a quiet dark surface. The
+// band is cleared first so moving the selection never leaves a stale fill.
 void drawSharkRowRail(int16_t y, int16_t h, bool selected) {
+  const int16_t m = 6, r = 6;
+  const int16_t w = tft.width() - m * 2;
   tft.startWrite();
+  tft.fillRect(0, y, tft.width(), h, UI_BG);
   if (selected) {
-    tft.fillRect(0, y, 4, h, UI.accent);          // bold rail on the focus row
+    tft.fillRoundRect(m, y, w, h, r, UI.icon);
   } else {
-    // A faint 1 px gutter keeps every row on a shared left spine, so the list
-    // reads as one aligned column instead of floating items.
-    tft.fillRect(0, y, 4, h, UI_BG);
-    tft.drawFastVLine(0, y, h, UI.line);
+    tft.fillRoundRect(m, y, w, h, r, UI.fg);
+    tft.drawRoundRect(m, y, w, h, r, UI.line);
   }
   tft.endWrite();
 }

@@ -644,16 +644,17 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
     int y = 4;
 
     tft.fillRect(0, 0, tft.width(), barHeight, UI_LABLE);
+    tft.fillRect(0, 0, 3, barHeight, UI_ICON);  // system accent spine
 
-    tft.drawRoundRect(x, y, 22, 10, 2, TFT_WHITE);
-    tft.fillRect(x + 22, y + 3, 2, 4, TFT_WHITE);
+    tft.drawRoundRect(x, y, 22, 10, 2, UI_TEXT);
+    tft.fillRect(x + 22, y + 3, 2, 4, UI_TEXT);
 
     int batteryLevelWidth = ::map(batteryPercentage, 0, 100, 0, 20);
     uint16_t batteryColor = (batteryPercentage > 20) ? GREEN : TFT_RED;
     tft.fillRoundRect(x + 2, y + 2, batteryLevelWidth, 6, 1, batteryColor);
 
     tft.setCursor(x + 30, y + 2);
-    tft.setTextColor(GREEN, UI_LABLE);
+    tft.setTextColor(UI_TEXT, UI_LABLE);
     tft.setTextFont(1);
     tft.setTextSize(1);
     tft.print(String(batteryPercentage) + "%");
@@ -678,8 +679,8 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
       tft.drawBitmap(wardGpsX, iconY, bitmap_icon_satellite, iconW, iconW, TFT_ORANGE);
     }
 
-    uint16_t wifiColor = (wifiDevices > 0) ? GREEN : TFT_WHITE;
-    uint16_t bleColor  = (bleDevices  > 0) ? TFT_CYAN  : TFT_WHITE;
+    uint16_t wifiColor = (wifiDevices > 0) ? GREEN : UI_DIM_TEXT;
+    uint16_t bleColor  = (bleDevices  > 0) ? TFT_CYAN  : UI_DIM_TEXT;
 
     int wifiStrength = 0;
     if (wifiDevices > 0) {
@@ -698,7 +699,7 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
       if (wifiStrength > i * 25) {
         tft.fillRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, GREEN);
       } else {
-        tft.drawRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, TFT_WHITE);
+        tft.drawRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, UI_DIM_TEXT);
       }
     }
 
@@ -720,7 +721,7 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
     }
 
     if (bottomSeparator) {
-      tft.drawFastHLine(0, barHeight - 1, tft.width(), TFT_WHITE);
+      tft.drawFastHLine(0, barHeight - 1, tft.width(), UI_ICON);
     }
 
     lastBatteryPercentage = batteryPercentage;
