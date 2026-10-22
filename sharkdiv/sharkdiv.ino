@@ -533,7 +533,7 @@ void updateActiveSubmenu() {
             break;
         case 6:
             active_submenu_items = tools_submenu_items;
-            active_submenu_size = tools_NUM_SUBMENU_ITEMS;
+            active_submenu_size = TOOLS_BASE_ITEMS + userAppCount();
             active_submenu_icons = tools_submenu_icons;
             break;
         case 7:
@@ -788,7 +788,6 @@ bool isPhysicalButtonPressed(int buttonPin) {
 static uint32_t s_navTapLatchMs[5] = {0};
 static bool     s_navTapLatchNew[5] = {false};
 static uint16_t s_navTapLatchDur[5] = {300, 300, 300, 300, 300};
-static bool     s_navTapOneShot[5] = {false};   // console-injected: single read
 
 bool isTouchNavButtonPressed(int buttonPin) {
   const int idx = touchNavIndexForPin(buttonPin);
@@ -802,17 +801,10 @@ bool isTouchNavButtonPressed(int buttonPin) {
     return true;
   }
   // A short tap between two loop iterations still counts as a press.
-  if (s_navTapLatchMs[idx] != 0 &&
-      millis() - s_navTapLatchMs[idx] < s_navTapLatchDur[idx]) {
-    if (s_navTapOneShot[idx]) {
-      // Console-injected step: deliver exactly one press, then clear, so a
-      // menu-open cannot double-fire into its first item.
-      s_navTapLatchMs[idx] = 0;
-      s_navTapOneShot[idx] = false;
-    }
-    return true;
-  }
-  return false;
+  // Window shorter than the menus' 200 ms poll gap: exactly one step per
+  // injected tap, regardless of which reader polls first.
+  return s_navTapLatchMs[idx] != 0 &&
+         millis() - s_navTapLatchMs[idx] < s_navTapLatchDur[idx];
 }
 
 #if DIV_VM_BUILD
@@ -5455,21 +5447,26 @@ volatile bool serialConsoleEnabled = true;
 
 static void serialConsoleTask(void*) {
   for (;;) {
+    // Menus disable the touch-nav input after a feature exits; keep it
+    // alive outside features so injected taps (and the nav bar) always work.
+    if (!feature_active && !touchButtonInputEnabled) {
+      setTouchButtonInputEnabled(true);
+    }
     while (Serial.available()) {
       const char cmd = (char)Serial.read();
       if (!serialConsoleEnabled) continue;   // QR serial-input owns the port
       int idx = -1;
       uint16_t dur = 300;
       switch (cmd) {
-        case 'U': dur = 120;  // fall through: deterministic single step
+        case 'U': dur = 260;  // fall through: deterministic single step
         case 'u': idx = touchNavIndexForPin(BTN_UP); break;
-        case 'D': dur = 120;
+        case 'D': dur = 260;
         case 'd': idx = touchNavIndexForPin(BTN_DOWN); break;
-        case 'L': dur = 120;
+        case 'L': dur = 260;
         case 'l': idx = touchNavIndexForPin(BTN_LEFT); break;
-        case 'R': dur = 120;
+        case 'R': dur = 260;
         case 'r': idx = touchNavIndexForPin(BTN_RIGHT); break;
-        case 'K': dur = 120;
+        case 'K': dur = 260;
         case 'k': idx = touchNavIndexForPin(BTN_SELECT); break;
         case 's':
           Serial.printf("[mcp] v=%s menu=%d(%s) sub=%d(%s) feature=%d theme=%d\n",
@@ -5504,7 +5501,6 @@ static void serialConsoleTask(void*) {
         s_navTapLatchMs[idx] = millis();
         s_navTapLatchNew[idx] = true;
         s_navTapLatchDur[idx] = dur;
-        s_navTapOneShot[idx] = (dur == 120);
       }
     }
     vTaskDelay(20 / portTICK_PERIOD_MS);
