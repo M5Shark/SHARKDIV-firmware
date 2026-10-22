@@ -24,6 +24,7 @@ enum Tab : uint8_t { T_DETECT, T_SENSORS, T_SCORE, T_GPS, T_LOG, T_SETT, T_COUNT
 static Phase s_phase = P_WIFI;
 static uint32_t s_phaseStart = 0;
 static Tab s_tab = T_DETECT;
+static uint8_t s_mode = 0;             // 0 all / 1 wifi / 2 ble
 static int s_cursor = 0;               // list cursor / selected target
 static int s_lastScore = 0;
 static uint32_t s_lastPaint = 0;
@@ -120,8 +121,11 @@ static void runPhase() {
       if (now - s_phaseStart < 100) flock_wifi::startProbeWindow();
       else if (now - s_phaseStart > flk::kProbeWindowMs) {
         flock_wifi::stopProbeWindow();
-        s_phase = s_settings[1] ? P_BLE : P_SENSORS;
-        if (s_phase == P_BLE) flock_ble::startWindow();
+        if (s_mode == 1) { s_phase = P_WIFI; }        // wifi-only loops
+        else {
+          s_phase = s_settings[1] ? P_BLE : P_SENSORS;
+          if (s_phase == P_BLE) flock_ble::startWindow();
+        }
         s_phaseStart = now;
       }
       break;
@@ -355,6 +359,11 @@ static void loadOuis() {
   f.close();
 }
 
+void openAt(uint8_t tab, uint8_t mode) {
+  s_tab = (Tab)(tab < T_COUNT ? tab : 0);
+  s_mode = mode;
+}
+
 void appSetup() {
   Serial.println("[flock] setup: chrome");
   pauseBackgroundRadioTasks();
@@ -369,7 +378,8 @@ void appSetup() {
   flock_log::begin();
   loadOuis();
   Serial.println("[flock] setup: done");
-  s_phase = P_WIFI;
+  s_phase = (s_mode == 2) ? P_BLE : P_WIFI;
+  if (s_phase == P_BLE) flock_ble::startWindow();
   s_phaseStart = millis();
   s_lastSensMs = 0;
   paint();

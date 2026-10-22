@@ -5292,32 +5292,33 @@ static void runFlockTileApp() {
   // The Apps tile: a launcher list. Flock Scanner plus every registered
   // user app; new apps built with the app builder appear here
   // automatically. Tapping a row or SELECT launches; Exit returns home.
-  const int flockEntries = 1;                       // Flock Scanner first
-  const int listCount = flockEntries + userAppCount();
+  // The Apps area is FLOCK TOOLS ONLY — every capability of the detector
+  // as its own entry (tab + scan mode the scanner opens at).
+  struct FlockTool { const char* name; uint8_t tab; uint8_t mode; };
+  static const FlockTool kFlockTools[] = {
+    { "Flock Scanner",  0, 0 },   // everything, detect view
+    { "WiFi Detect",    0, 1 },   // SSID/OUI + probe sniffer only
+    { "BLE Detect",     0, 2 },   // passive BLE only
+    { "Signal Meter",   0, 1 },   // live RSSI of best target
+    { "2.4G + LTE",     1, 0 },   // supporting sensors
+    { "Flock Score",    2, 0 },   // confidence readout
+    { "GPS / Map",      3, 0 },   // geotag + follow status
+    { "Log / Export",   4, 0 },   // session log + DeFlock export
+    { "Flock Settings", 5, 0 },   // NVS settings
+  };
+  const int listCount = sizeof(kFlockTools) / sizeof(kFlockTools[0]);
 
   auto launchItem = [&](int idx) {
-    if (idx == 0) {
-      feature_active = true;
-      feature_exit_requested = false;
-      setTouchButtonInputEnabled(true);
-      flock_menu::appSetup();
-      while (feature_active && !feature_exit_requested) {
-        flock_menu::appLoop();
-        if (featureExitButtonPressed()) break;
-      }
-      flock_menu::exit();
-    } else {
-      const UserApp& app = userApps()[idx - flockEntries];
-      feature_active = true;
-      feature_exit_requested = false;
-      setTouchButtonInputEnabled(true);
-      app.setup();
-      while (feature_active && !feature_exit_requested) {
-        app.loop();
-        if (featureExitButtonPressed()) break;
-      }
-      app.exitFn();
+    feature_active = true;
+    feature_exit_requested = false;
+    setTouchButtonInputEnabled(true);
+    flock_menu::openAt(kFlockTools[idx].tab, kFlockTools[idx].mode);
+    flock_menu::appSetup();
+    while (feature_active && !feature_exit_requested) {
+      flock_menu::appLoop();
+      if (featureExitButtonPressed()) break;
     }
+    flock_menu::exit();
     delay(400);   // drain the exit tap so the list does not relaunch
   };
 
@@ -5336,17 +5337,16 @@ static void runFlockTileApp() {
       tft.drawFastHLine(0, 38, tft.width(), UI_LINE);
       tft.setTextDatum(TL_DATUM);
       for (int i = 0; i < listCount; i++) {
-        const int y = 50 + i * 30;
+        const int y = 48 + i * 26;
         const bool sel = (i == cursor);
-        tft.fillRect(6, y, tft.width() - 12, 26, sel ? UI_LABLE : TFT_BLACK);
-        tft.drawRect(6, y, tft.width() - 12, 26, sel ? UI_ICON : UI_LINE);
+        tft.fillRect(6, y, tft.width() - 12, 24, sel ? UI_LABLE : TFT_BLACK);
+        tft.drawRect(6, y, tft.width() - 12, 24, sel ? UI_ICON : UI_LINE);
         tft.setTextColor(sel ? UI_ICON : UI_TEXT, TFT_BLACK);
-        tft.drawString(String(i == 0 ? "> " : "  ") +
-                       (i == 0 ? "Flock Scanner" : userApps()[i - 1].name),
+        tft.drawString(String(i == cursor ? "> " : "  ") + kFlockTools[i].name,
                        12, y + 8, 2);
       }
       tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-      tft.drawString("tap a row or SELECT to launch", 8, 50 + listCount * 30 + 6, 1);
+      tft.drawString("tap a row or SELECT to launch", 8, 48 + listCount * 26 + 6, 1);
       setupTouchscreen();
       redrawTouchButtonBar();
     }
@@ -5380,8 +5380,8 @@ static void runFlockTileApp() {
     if (readTouchXY(tx, ty)) {
       delay(30);
       for (int i = 0; i < listCount; i++) {
-        const int y = 50 + i * 30;
-        if (ty >= y && ty <= y + 26) {
+        const int y = 48 + i * 26;
+        if (ty >= y && ty <= y + 24) {
           launchItem(i);
           feature_active = false;
           feature_exit_requested = false;
