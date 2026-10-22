@@ -1,9 +1,9 @@
 #pragma once
 
 // SharkUI — SHARKDIV UI layer.
-//   playSharkBoot()   1-bit glitch boot reel (wipe, hourglass, the user's
-//                     skull swinging and shattering, the shark mark slamming
-//                     in, dot-matrix fade) followed by the logo splash
+//   playSharkBoot()   1-bit glitch boot reel (wipe, the user's skull
+//                     dropping in and dissolving, the shark mark pulling back
+//                     from its eye, dot-matrix fade) followed by the logo splash
 //   drawSharkTile()   menu card: glass surface, solid accent when selected
 //   drawSharkRowRail() list-row surface used by the submenus
 //   drawBitmap2x()    icon.h bitmap at double size
