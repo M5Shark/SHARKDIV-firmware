@@ -5324,11 +5324,13 @@ static void runFlockTileApp() {
 
   int cursor = 0;
   bool redraw = true;
+  feature_active = true;             // nav bar must work inside the list
+  feature_exit_requested = false;
   for (;;) {
     if (redraw) {
       redraw = false;
       setTouchButtonInputEnabled(true);
-      setTouchNavLabels(nullptr, nullptr, "Exit", nullptr, nullptr);
+      setTouchNavLabels(nullptr, nullptr, "Home", nullptr, nullptr);
       featureClearContent(TFT_BLACK);
       drawStatusBar(readBatteryVoltage(), true);
       tft.setTextDatum(ML_DATUM);
@@ -5351,9 +5353,13 @@ static void runFlockTileApp() {
       redrawTouchButtonBar();
     }
 
-    // Exit (center) leaves the launcher back to the home menu.
+    // Exit (center) or header tap leaves the launcher back to the home
+    // menu. The delay also lets the tap's latch expire so the home menu
+    // does not react to it.
     if (featureExitButtonPressed()) {
-      delay(300);
+      int hx, hy;
+      while (readTouchXYDismiss(hx, hy)) delay(10);
+      delay(350);
       break;
     }
     if (isButtonPressed(BTN_UP) || isTouchNavButtonPressedEdge(BTN_UP)) {
@@ -5371,7 +5377,7 @@ static void runFlockTileApp() {
     if (isButtonPressed(BTN_SELECT)) {
       delay(200);
       launchItem(cursor);
-      feature_active = false;
+      feature_active = true;
       feature_exit_requested = false;
       redraw = true;
       continue;
@@ -5379,11 +5385,15 @@ static void runFlockTileApp() {
     int tx, ty;
     if (readTouchXY(tx, ty)) {
       delay(30);
+      if (ty < 44) {                 // header tap = home
+        delay(300);
+        break;
+      }
       for (int i = 0; i < listCount; i++) {
         const int y = 48 + i * 26;
         if (ty >= y && ty <= y + 24) {
           launchItem(i);
-          feature_active = false;
+          feature_active = true;
           feature_exit_requested = false;
           redraw = true;
           break;
