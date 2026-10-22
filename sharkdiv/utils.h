@@ -37,6 +37,10 @@ void reclaimSharedSpiBus();
 /** Hold SD CS high and set a CC1101-safe SPI rate on the shared bus. */
 void holdSdInactiveOnSharedSpi();
 void drawStatusBar(float batteryVoltage, bool forceUpdate = false, bool bottomSeparator = false);
+/** Title shown on the left of the status bar; accent is drawn after it in brand green. */
+void setStatusTitle(const char* title, const char* accent = nullptr);
+/** SD card detected at the last status poll. */
+extern bool sdCardPresent;
 void startStatusBarTask();
 /** Request a status bar pass on the next update (e.g. after SD or ward state changes). */
 void requestStatusBarRedraw();

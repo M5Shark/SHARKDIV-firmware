@@ -8,9 +8,10 @@
 
 namespace flock_wifi {
 
-static constexpr int kMaxHits = 12;
 static Hit s_hits[kMaxHits];
 static int s_hitCount = 0;
+// The hit table is written from the Wi-Fi task and read from the UI loop.
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_scanning = false;
 static bool s_probing = false;
 
@@ -52,27 +53,51 @@ static void upsert(const uint8_t* mac, const char* ssid, int8_t rssi,
   char macStr[18];
   snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&s_lock);
+  int slot = -1;
   for (int i = 0; i < s_hitCount; i++) {
-    if (!strcmp(s_hits[i].mac, macStr)) {
-      s_hits[i].rssi = rssi;
-      s_hits[i].lastMs = millis();
-      s_hits[i].bySsid |= bySsid;
-      s_hits[i].byOui |= byOui;
-      s_hits[i].byProbe |= byProbe;
-      return;
-    }
+    if (!strcmp(s_hits[i].mac, macStr)) { slot = i; break; }
   }
-  if (s_hitCount >= kMaxHits) return;
-  Hit& h = s_hits[s_hitCount++];
-  strncpy(h.mac, macStr, 17); h.mac[17] = 0;
-  strncpy(h.ssid, ssid ? ssid : "", 32); h.ssid[32] = 0;
-  h.rssi = rssi;
-  h.bySsid = bySsid; h.byOui = byOui; h.byProbe = byProbe;
-  h.lastMs = millis();
+  if (slot >= 0) {
+    Hit& h = s_hits[slot];
+    h.rssi = rssi;
+    h.lastMs = now;
+    h.bySsid |= bySsid;
+    h.byOui |= byOui;
+    h.byProbe |= byProbe;
+    if (ssid && ssid[0] && !h.ssid[0]) { strncpy(h.ssid, ssid, 32); h.ssid[32] = 0; }
+  } else {
+    if (s_hitCount < kMaxHits) {
+      slot = s_hitCount++;
+    } else {                     // table full: reuse the stalest entry
+      slot = 0;
+      for (int i = 1; i < kMaxHits; i++)
+        if (s_hits[i].lastMs < s_hits[slot].lastMs) slot = i;
+    }
+    Hit& h = s_hits[slot];
+    strncpy(h.mac, macStr, 17); h.mac[17] = 0;
+    strncpy(h.ssid, ssid ? ssid : "", 32); h.ssid[32] = 0;
+    h.rssi = rssi;
+    h.bySsid = bySsid; h.byOui = byOui; h.byProbe = byProbe;
+    h.lastMs = now;
+  }
+  portEXIT_CRITICAL(&s_lock);
+}
+
+// Drop hits not seen for kHitTtlMs. Call with s_lock held.
+static void pruneLocked(uint32_t now) {
+  int w = 0;
+  for (int i = 0; i < s_hitCount; i++) {
+    if (now - s_hits[i].lastMs <= flk::kHitTtlMs) s_hits[w++] = s_hits[i];
+  }
+  s_hitCount = w;
 }
 
 void begin() {
+  portENTER_CRITICAL(&s_lock);
   s_hitCount = 0;
+  portEXIT_CRITICAL(&s_lock);
   s_extraOuiCount = 0;
 }
 
@@ -107,6 +132,7 @@ bool pollScan(int* matchedCount) {
 static void IRAM_ATTR probeCb(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (type != WIFI_PKT_MGMT) return;
   const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  if (pkt->rx_ctrl.sig_len < 26) return;   // too short to hold the fields read below
   const uint8_t* f = pkt->payload;
   // frame control little-endian: type=sub>>2? use explicit bits.
   const uint8_t fc0 = f[0];
@@ -139,20 +165,44 @@ void stopProbeWindow() {
 
 void pollProbes() {}   // callback-driven
 
-const Hit* hits() { return s_hits; }
-int hitCount() { return s_hitCount; }
+int snapshot(Hit* out, int max) {
+  Hit tmp[kMaxHits];
+  portENTER_CRITICAL(&s_lock);
+  pruneLocked(millis());
+  const int n = s_hitCount;
+  memcpy(tmp, s_hits, sizeof(Hit) * n);
+  portEXIT_CRITICAL(&s_lock);
+  // strongest first (insertion sort; n <= 12)
+  for (int i = 1; i < n; i++) {
+    const Hit k = tmp[i];
+    int j = i - 1;
+    while (j >= 0 && tmp[j].rssi < k.rssi) { tmp[j + 1] = tmp[j]; j--; }
+    tmp[j + 1] = k;
+  }
+  const int c = n < max ? n : max;
+  memcpy(out, tmp, sizeof(Hit) * c);
+  return c;
+}
+
+int hitCount() {
+  portENTER_CRITICAL(&s_lock);
+  pruneLocked(millis());
+  const int n = s_hitCount;
+  portEXIT_CRITICAL(&s_lock);
+  return n;
+}
 
 int bestRssi() {
-  int best = -128;
-  for (int i = 0; i < s_hitCount; i++) {
-    if (s_hits[i].rssi > best) best = s_hits[i].rssi;
-  }
-  return best;
+  Hit tmp[kMaxHits];
+  const int n = snapshot(tmp, kMaxHits);
+  return n > 0 ? tmp[0].rssi : -128;
 }
 
 bool anyConfirmed() {
-  for (int i = 0; i < s_hitCount; i++) {
-    if (s_hits[i].bySsid || (s_hits[i].byOui && s_hits[i].byProbe)) return true;
+  Hit tmp[kMaxHits];
+  const int n = snapshot(tmp, kMaxHits);
+  for (int i = 0; i < n; i++) {
+    if (tmp[i].bySsid || (tmp[i].byOui && tmp[i].byProbe)) return true;
   }
   return false;
 }

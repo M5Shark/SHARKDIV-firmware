@@ -7,6 +7,10 @@
 static AppSettings g_settings;
 AppSettings& settings() { return g_settings; }
 
+// UI generation written to settings.json; older files are moved onto the Shark
+// theme once when the UI generation changes.
+static constexpr uint8_t kUiGeneration = 2;
+
 static const AccentOption kAccentPresets[] = {
   {"Orange", 0xFBE4},
   {"Green",  0xB721},
@@ -105,9 +109,10 @@ bool settingsLoad() {
     if (t > (uint8_t)Theme::Shark) t = (uint8_t)s.theme;
     s.theme = (Theme)t;
   }
-  // One-time UI migration: settings written before the M5SHARK-style UI get
-  // moved onto the new Shark theme once; after that the stored choice wins.
-  if (!doc["uiV"].is<uint8_t>()) {
+  // One-time UI migrations: settings written before the current UI generation
+  // move onto the Shark theme (the SHARKDIV brand palette) once; after that
+  // the stored choice wins. uiV 1 = M5SHARK UI, 2 = SHARKDIV brand UI.
+  if ((doc["uiV"] | (uint8_t)0) < kUiGeneration) {
     s.theme = Theme::Shark;
   }
   s.accentColor     = accentPresetClamp(doc["accentColor"] | s.accentColor);
@@ -154,7 +159,7 @@ bool settingsSave() {
   auto& s = g_settings;
   StaticJsonDocument<512> doc;
   doc["board"]           = TOUCH_PROFILE_ID;
-  doc["uiV"]             = (uint8_t)1;  // UI generation marker (Shark UI = 1)
+  doc["uiV"]             = kUiGeneration;  // UI generation marker (see settingsLoad)
   doc["brightness"]      = s.brightness;
   doc["theme"]           = (uint8_t)s.theme;
   doc["accentColor"]     = s.accentColor;

@@ -18,23 +18,22 @@
 #define HACK_LABLE  0x0560
 #define HACK_ACCENT 0x07FF
 
-// Shark theme: M5SHARK "ctOS" look — bone white on black, one cyan accent.
-//   bg    0x0000  pure black
-//   fg    0x10A3  dark tile surface (deep blue-grey)
-//   icon  0x07FF  cyan system accent
-//   text  0xC618  bone white labels
-//   line  0x29C8  dim cyan edge
-//   lable 0x1904  near-black panel fill (status bar reads as black)
-//   accent 0x07FF cyan
-//   warn  0xFD20  amber warnings/toggles
+// Shark theme: the SHARKDIV brand — the web flasher's phosphor green on black.
+//   bg     black
+//   fg     card / key surface (dark green)
+//   icon   phosphor green accent
+//   text   green-tinted ink
+//   line   green hairline
+//   lable  header / nav band
+//   warn   amber
 #define SHARK_BG     0x0000
-#define SHARK_FG     0x10A3
-#define SHARK_ICON   0x07FF
-#define SHARK_TEXT   0xC618
-#define SHARK_LINE   0x29C8
-#define SHARK_LABLE  0x1904
-#define SHARK_ACCENT 0x07FF
-#define SHARK_WARN   0xFD20
+#define SHARK_FG     BRAND_CARD
+#define SHARK_ICON   BRAND_ACCENT
+#define SHARK_TEXT   BRAND_INK
+#define SHARK_LINE   BRAND_LINE
+#define SHARK_LABLE  BRAND_BAND
+#define SHARK_ACCENT BRAND_ACCENT
+#define SHARK_WARN   BRAND_WARN
 
 UiPalette UI = { SHARK_BG, SHARK_FG, SHARK_ICON, SHARK_TEXT, SHARK_ACCENT,
                  SHARK_LINE, SHARK_LABLE, SHARK_WARN, SHARK_ICON };

@@ -25,8 +25,11 @@ void startProbeWindow();
 void stopProbeWindow();
 void pollProbes();
 
-const Hit* hits();
-int hitCount();               // best matches first
+constexpr int kMaxHits = 12;
+// Copy of the current hits, strongest first; entries unseen for
+// flk::kHitTtlMs are dropped. Safe to call from the UI.
+int snapshot(Hit* out, int max);
+int hitCount();
 int bestRssi();               // strongest matched RSSI (for the meter)
 bool anyConfirmed();          // SSID or OUI+probe match
 

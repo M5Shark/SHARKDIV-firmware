@@ -40,6 +40,18 @@ uint16_t uiUniversalColor();
 #define L_Dark        0x4208
 #define L_Light       0xC618
 
+// SHARKDIV brand palette — the web flasher's tokens (phosphor green on black,
+// green-tinted ink and hairlines), nudged brighter where the ILI9341 would
+// crush the darkest values to black.
+#define BRAND_ACCENT  0x3F0F  // #3ee07f phosphor green
+#define BRAND_INK     0xEF9D  // #e9f3ec ink
+#define BRAND_MUTED   0x7CB1  // #7f958a secondary text
+#define BRAND_BAND    0x0881  // #0b100d header / nav band
+#define BRAND_CARD    0x0922  // #0e2416 card + key surface
+#define BRAND_LINE    0x19C5  // #1f3a2a hairline
+#define BRAND_GRID    0x1123  // #12261a background dot grid
+#define BRAND_WARN    0xFEA9  // #ffd54f amber
+
 // Default background for feature screens (separate from main menu background).
 // Currently black, but you can change this one define to restyle all features.
 #ifndef FEATURE_BG
@@ -822,7 +834,9 @@ uint16_t uiUniversalColor();
 // Dim label text color (used for *text* only).
 // Keep UI_LABLE unchanged because it's also used for fills (e.g., status bar bg).
 static inline uint16_t uiDimTextColor() {
-  // In Dark/Hacker/Shark themes the label fill is intentionally very dark;
+  // SHARKDIV brand theme: green-grey secondary text.
+  if (UI.icon == BRAND_ACCENT) return BRAND_MUTED;
+  // In Dark/Hacker themes the label fill is intentionally very dark;
   // brighten text a bit so secondary text stays readable on black.
   return (UI.bg == BG_Dark || UI.bg == 0x0000) ? GRAY : UI_LABLE;
 }
