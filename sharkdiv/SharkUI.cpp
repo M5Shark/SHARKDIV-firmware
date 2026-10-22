@@ -381,22 +381,29 @@ static void drawLayer(const GLayer& L, uint16_t col, float scale) {
   }
 }
 
-// scaled blit of a rendered wordmark sprite (the reel's 9x -> 1 zoom)
-static void blitScaled(TFT_eSprite& spr, float cx, float cy, float scale) {
-  const int16_t sw = spr.width();
-  const int16_t sh = spr.height();
-  const int16_t dw = (int16_t)(sw * scale);
-  const int16_t dh = (int16_t)(sh * scale);
-  const int16_t x0 = (int16_t)cx - dw / 2;
-  const int16_t y0 = (int16_t)cy - dh / 2;
+// Fast scaled blit of a 1-bit bitmap (row-sampled, pushed as rects).
+// dw can reach ~1000 px at the reel's 9x slam — pixel-by-pixel would take
+// seconds, rows via pushRect take milliseconds.
+static uint16_t s_blitRow[544];   // max scaled width at 120*~4.5 on portrait
+
+static void blitScaled1bit(const uint8_t* bmp, int16_t bw, int16_t bh,
+                           int16_t cx, int16_t cy, float scale, uint16_t col) {
+  const int16_t dw = (int16_t)(bw * scale);
+  const int16_t dh = (int16_t)(bh * scale);
+  if (dw <= 0 || dh <= 0 || dw > 544) return;
+  const int16_t x0 = cx - dw / 2;
+  const int16_t y0 = cy - dh / 2;
+  const int16_t rowBytes = (bw + 7) / 8;
   for (int16_t y = 0; y < dh; y++) {
-    const int16_t sy = (y * sh) / dh;
+    const int16_t sy = (y * bh) / dh;
+    if (sy < 0 || sy >= bh) continue;
+    uint16_t wn = 0;
     for (int16_t x = 0; x < dw; x++) {
-      const int16_t sx = (x * sw) / dw;
-      if ((sx | sy) < 0) continue;
-      const uint16_t c = spr.readPixel(sx, sy);
-      if (c != TFT_BLACK) tft.drawPixel(x0 + x, y0 + y, c);
+      const int16_t sx = (x * bw) / dw;
+      const uint8_t byte = pgm_read_byte(&bmp[sy * rowBytes + (sx >> 3)]);
+      s_blitRow[wn++] = (byte & (0x80 >> (sx & 7))) ? col : TFT_BLACK;
     }
+    tft.pushRect(x0, y0 + y, dw, 1, s_blitRow);
   }
 }
 
@@ -418,15 +425,7 @@ void run() {
 
   tft.fillScreen(TFT_BLACK);
 
-  // wordmark sprite, rendered once (green on transparent=black)
-  TFT_eSprite wm(&tft);
-  wm.setColorDepth(16);
-  wm.createSprite(104, 18);
-  wm.fillSprite(TFT_BLACK);
-  wm.setTextDatum(MC_DATUM);
-  wm.setTextColor(kGreen, TFT_BLACK);
-  wm.drawString("SHARKDIV", 52, 9, 2);
-  wm.setTextDatum(TL_DATUM);
+  // The slam mark is the user's own DEDSEC artwork (alpha = ink).
 
   // skull pose at reel frame (holds between keyframes): f6..f18
   auto skullPoseAt = [](int f) -> int {
@@ -484,16 +483,16 @@ void run() {
     if (f == 19) drawLayer(gl_beam19, kPaper, s160);
     if (f == 20) drawLayer(gl_beam20, kPaper, s160);
 
-    // f19-f29: wordmark slam zoom (reel transform table)
+    // f19-f29: the mark slams in huge and zooms out (reel transform table)
     if (f >= 19 && f <= 29) {
       const int k = f - 19;
       const float dx = kSlam[k][0] * (W / 100.0f);
       const float dy = kSlam[k][1] * (ST_H / 100.0f);
-      // stepline behind the settled logo (f26-f28)
       if (f >= 26 && f <= 28) {
         drawLayer(gl_stepline, kDim, s160);
       }
-      blitScaled(wm, cx + dx, cy + dy, kSlam[k][2]);
+      blitScaled1bit(glitch_dedsec, GLITCH_DD_W, GLITCH_DD_H,
+                     cx + dx, cy + dy, kSlam[k][2], kGreen);
     }
 
     // f28: beam + corner glitch over the logo
@@ -525,7 +524,6 @@ void run() {
   }
 
   delay(200);
-  wm.deleteSprite();
   tft.fillScreen(TFT_BLACK);
 }
 
