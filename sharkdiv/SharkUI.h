@@ -1,16 +1,18 @@
 #pragma once
 
-// SharkUI — M5SHARK-style UI layer for SHARKDIV.
-//   playSharkBoot()   animated ctOS boot splash (character-cell skull that
-//                     decodes out of carrier noise, glitch, lock)
-//   drawSharkTile()   ctOS menu tile: hard edges, accent rail + corner ticks
-//                     on the selected tile
-//   drawSharkRowRail() list-row accent rail used by the submenus
-// Ported from github.com/M5Shark/M5Shark (SharkUI/SharkTheme), restyled onto
-// the ESP32-DIV runtime palette so every theme tints it.
+// SharkUI — SHARKDIV UI layer.
+//   playSharkBoot()   1-bit glitch boot reel (wipe, hourglass, the user's
+//                     skull swinging and shattering, the shark mark slamming
+//                     in, dot-matrix fade) followed by the logo splash
+//   drawSharkTile()   menu card: glass surface, solid accent when selected
+//   drawSharkRowRail() list-row surface used by the submenus
+//   drawBitmap2x()    icon.h bitmap at double size
+//   drawBrandGrid()   faint dot grid behind the menus (brand theme)
 
 #include "shared.h"
 
 void playSharkBoot();
 void drawSharkTile(int16_t x, int16_t y, int16_t w, int16_t h, bool selected);
 void drawSharkRowRail(int16_t y, int16_t h, bool selected);
+void drawBitmap2x(int16_t x, int16_t y, const uint8_t* bmp, uint16_t color);
+void drawBrandGrid(int16_t y0, int16_t y1);

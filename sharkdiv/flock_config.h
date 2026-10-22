@@ -26,6 +26,7 @@ constexpr int      kRssiPossible   = -85;   // weaker than this = ignore
 constexpr int      kNrfActiveHits  = 8;     // RPD hits/channels => activity
 constexpr int      kLteRssiDbm     = -70;   // CC1101 burst threshold
 constexpr uint32_t kRealertMs      = 30000; // same-MAC re-alert suppression
+constexpr uint32_t kHitTtlMs       = 120000;// drop devices unseen this long
 constexpr float    kFollowMinM     = 500.0f;// follow-alert distance
 constexpr int      kFollowFixes    = 3;     // positions needed for follow
 

@@ -548,6 +548,18 @@ static int statusBarTempBand(float t) {
   return 0;
 }
 
+// Title on the left of the status bar. Each menu screen sets its own
+// ("SHARK"+"DIV" on home, the category on submenus); feature screens keep the
+// last one, so a WiFi tool still reads "WiFi" up top.
+static const char* s_barTitle  = "SHARK";
+static const char* s_barAccent = "DIV";
+static int s_wardX = -1;   // x of the blinking wardriver icon, -1 when not drawn
+
+void setStatusTitle(const char* title, const char* accent) {
+  s_barTitle  = title ? title : "";
+  s_barAccent = accent;
+}
+
 void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator) {
   static int lastBatteryPercentage = -1;
   static int lastWifiHalf          = -100000;
@@ -616,21 +628,12 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
       bleHalf == lastBleHalf && tempBand == lastTempBand && sdSnap == lastSdSnap;
 
   if (wardBlinkOnly) {
-    constexpr int kBarH   = 20;
-    constexpr int kY      = 4;
-    constexpr int kIconY  = kY - 2;
-    constexpr int kIconW  = 16;
-    constexpr int kGap    = 3;
-    constexpr int kBleIx  = 130;
-    constexpr int kBleDrawX = kBleIx + 25;
-    const int wardGpsX    = kBleDrawX - kGap - kIconW;
-    if (wardSatVisible) {
-      tft.drawBitmap(wardGpsX, kIconY, bitmap_icon_satellite, kIconW, kIconW, TFT_ORANGE);
-    } else {
-      tft.fillRect(wardGpsX, kIconY, kIconW, kIconW, UI_LABLE);
-    }
-    if (bottomSeparator) {
-      tft.drawFastHLine(0, kBarH - 1, tft.width(), TFT_WHITE);
+    if (s_wardX >= 0) {
+      if (wardSatVisible) {
+        tft.drawBitmap(s_wardX, 2, bitmap_icon_satellite, 16, 16, UI_WARN);
+      } else {
+        tft.fillRect(s_wardX, 2, 16, 16, UI_LABLE);
+      }
     }
     lastWardBlinkPhase = wardBlinkPhase;
     return;
@@ -639,90 +642,73 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
   if (battCh || wifiHalf != lastWifiHalf || bleHalf != lastBleHalf || tempBand != lastTempBand ||
       sdSnap != lastSdSnap || wardGpsIcon != lastWardGpsIcon ||
       (wardGpsIcon && wardBlinkPhase != lastWardBlinkPhase) || forceUpdate) {
-    int barHeight = 20;
-    int x = 7;
-    int y = 4;
-
+    const int barHeight = 20;
     tft.fillRect(0, 0, tft.width(), barHeight, UI_LABLE);
-    tft.fillRect(0, 0, 3, barHeight, UI_ICON);  // system accent spine
 
-    tft.drawRoundRect(x, y, 22, 10, 2, UI_TEXT);
-    tft.fillRect(x + 22, y + 3, 2, 4, UI_TEXT);
-
-    int batteryLevelWidth = ::map(batteryPercentage, 0, 100, 0, 20);
-    uint16_t batteryColor = (batteryPercentage > 20) ? GREEN : TFT_RED;
-    tft.fillRoundRect(x + 2, y + 2, batteryLevelWidth, 6, 1, batteryColor);
-
-    tft.setCursor(x + 30, y + 2);
+    // Left: screen title in bold sans with the accent word in brand green.
+    // A title too long for the gap before the icons drops to font 2.
+    tft.setFreeFont(&FreeSansBold9pt7b);
+    int titleW  = tft.textWidth(s_barTitle);
+    int accentW = s_barAccent ? tft.textWidth(s_barAccent) : 0;
+    if (titleW + accentW > 96) {
+      tft.setTextFont(2);
+      titleW  = tft.textWidth(s_barTitle);
+      accentW = s_barAccent ? tft.textWidth(s_barAccent) : 0;
+    }
+    tft.setTextDatum(L_BASELINE);
     tft.setTextColor(UI_TEXT, UI_LABLE);
+    tft.drawString(s_barTitle, 8, 15);
+    if (s_barAccent) {
+      tft.setTextColor(UI_ICON, UI_LABLE);
+      tft.drawString(s_barAccent, 8 + titleW, 15);
+    }
+    const int titleEnd = 8 + titleW + accentW;
     tft.setTextFont(1);
     tft.setTextSize(1);
-    tft.print(String(batteryPercentage) + "%");
 
-    const int iconW         = 16;
-    const int gap           = 3;
-    const int wifiBarsWidth = 24;
+    // Right: battery outline, level and percent.
+    const int bx = 189, by = 5;
+    tft.drawRoundRect(bx, by, 20, 10, 2, UI_TEXT);
+    tft.fillRect(bx + 20, by + 3, 2, 4, UI_TEXT);
+    tft.fillRect(bx + 2, by + 2, ::map(batteryPercentage, 0, 100, 0, 16), 6,
+                 batteryPercentage > 20 ? UI_ICON : TFT_RED);
+    tft.setTextColor(UI_TEXT, UI_LABLE);
+    tft.setTextDatum(MR_DATUM);
+    tft.drawString(String(batteryPercentage) + "%", 238, 10);
+    tft.setTextDatum(TL_DATUM);
 
-    const int bleIconX      = 130;
-    const int bleTextX      = bleIconX + iconW + gap;
-    const int wifiBarsX     = bleTextX + 12 + gap;
-    const int tempIconX     = wifiBarsX + wifiBarsWidth + gap;
-    const int sdIconX       = tempIconX + iconW + gap;
-    int iconY               = y - 2;
-
-    int clearWidth = tft.width() - bleIconX;
-    tft.fillRect(bleIconX, 0, clearWidth, barHeight, UI_LABLE);
-
-    const int bleDrawX = bleIconX + 25;
-    if (wardSatVisible) {
-      const int wardGpsX = bleDrawX - gap - iconW;
-      tft.drawBitmap(wardGpsX, iconY, bitmap_icon_satellite, iconW, iconW, TFT_ORANGE);
-    }
-
-    uint16_t wifiColor = (wifiDevices > 0) ? GREEN : UI_DIM_TEXT;
-    uint16_t bleColor  = (bleDevices  > 0) ? TFT_CYAN  : UI_DIM_TEXT;
-
-    int wifiStrength = 0;
-    if (wifiDevices > 0) {
-
-      wifiStrength = constrain(::map(wifiDevices, 0, 15, 0, 100), 0, 100);
-    }
-
-    int wifiX = wifiBarsX + 10;
-    int wifiY = y + 11;
-
+    // Radio activity: BLE glyph and four Wi-Fi bars, green when something is seen.
+    tft.drawBitmap(170, 2, bitmap_icon_ble, 16, 16, bleDevices > 0 ? UI_ICON : UI_DIM_TEXT);
+    const int wifiStrength =
+        wifiDevices > 0 ? constrain(::map(wifiDevices, 0, 15, 0, 100), 0, 100) : 0;
     for (int i = 0; i < 4; i++) {
-      const int sigBarH = (i + 1) * 3;
-      const int barWidth  = 4;
-      const int barX      = wifiX + i * 6;
-
-      if (wifiStrength > i * 25) {
-        tft.fillRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, GREEN);
-      } else {
-        tft.drawRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, UI_DIM_TEXT);
-      }
+      const int h = (i + 1) * 3, wx = 146 + i * 6;
+      if (wifiStrength > i * 25) tft.fillRect(wx, 15 - h, 4, h, UI_ICON);
+      else                       tft.drawRect(wx, 15 - h, 4, h, UI_DIM_TEXT);
     }
 
-    tft.drawBitmap(bleIconX + 25, iconY, bitmap_icon_ble, 16, 16, bleColor);
-    tft.setTextColor(bleColor, UI_LABLE);
-
-    if (internalTemp == 53.33f) {
-      tft.drawBitmap(tempIconX + 10, y - 2, bitmap_icon_temp, 16, 16, TFT_YELLOW);
-    } else if (internalTemp > 55) {
-      tft.drawBitmap(tempIconX + 10, y - 2, bitmap_icon_temp, 16, 16, TFT_RED);
-    } else {
-      tft.drawBitmap(tempIconX + 10, y - 2, bitmap_icon_temp, 16, 16, GREEN);
+    // Alerts only when they need attention — the blinking wardriver GPS, an odd
+    // or hot sensor temperature, a missing SD card — flowed after the title.
+    int ax = titleEnd + 6;
+    s_wardX = -1;
+    if (wardGpsIcon && ax + 16 <= 142) {
+      s_wardX = ax;
+      if (wardSatVisible) tft.drawBitmap(ax, 2, bitmap_icon_satellite, 16, 16, UI_WARN);
+      ax += 18;
+    }
+    if (tempBand != 0 && ax + 16 <= 142) {
+      tft.drawBitmap(ax, 2, bitmap_icon_temp, 16, 16, tempBand == 2 ? TFT_RED : UI_WARN);
+      ax += 18;
+    }
+    if (!sdCardPresent && ax + 16 <= 142) {
+      tft.drawBitmap(ax, 2, bitmap_icon_nullsdcard, 16, 16, TFT_RED);
     }
 
-    if (sdCardPresent) {
-      tft.drawBitmap(sdIconX + 10, y - 2, bitmap_icon_sdcard, 16, 16, GREEN);
-    } else {
-      tft.drawBitmap(sdIconX + 10, y - 2, bitmap_icon_nullsdcard, 16, 16, TFT_RED);
-    }
-
-    if (bottomSeparator) {
-      tft.drawFastHLine(0, barHeight - 1, tft.width(), UI_ICON);
-    }
+    // Hairline under the bar, green under the title — drawn on every redraw
+    // since the background refresh passes no separator flag.
+    tft.drawFastHLine(0, barHeight - 1, tft.width(), UI_LINE);
+    tft.drawFastHLine(0, barHeight - 1, titleEnd + 4, UI_ICON);
+    (void)bottomSeparator;
 
     lastBatteryPercentage = batteryPercentage;
     lastWifiHalf          = wifiHalf;
@@ -1279,8 +1265,7 @@ void loading(int frameDelay, uint16_t color, int16_t x, int16_t y, int repeats, 
 void displayLogo(uint16_t color, int displayTime) {
   UNUSED(color);
 
-  // M5SHARK-style ctOS boot: carrier noise -> decoding skull -> glitch ->
-  // lock. Palette follows the active theme (Shark default).
+  // Glitch boot reel, then the SHARKDIV logo splash.
   playSharkBoot();
 
   // CiferTech credits stay on the serial console (upstream attribution).
