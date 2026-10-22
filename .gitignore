@@ -12,3 +12,7 @@ build/
 *.bak
 .DS_Store
 Thumbs.db
+
+# Local-only: reference art and tool settings, never published
+docs/skull-glitch/
+.claude/

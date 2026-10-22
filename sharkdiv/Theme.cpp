@@ -70,8 +70,8 @@ void applyThemeToPalette(Theme t) {
     UI.ok     =  HACK_TEXT;
 
   } else if (t == Theme::Shark) {
-    // M5SHARK ctOS style: black surfaces, bone text, single cyan accent.
-    // The accent preset is ignored so the system color stays cyan.
+    // SHARKDIV brand: black surfaces, green-tinted ink, phosphor green accent.
+    // The accent preset is ignored so the system color stays brand green.
     UI.bg     =  SHARK_BG;
     UI.fg     =  SHARK_FG;
     UI.icon   =  SHARK_ICON;

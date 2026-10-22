@@ -9,7 +9,7 @@ radios, PN532 RFID, IR transceiver, GPS).
 > You are responsible for how you use it. The jamming tools some other
 > firmwares carry are deliberately **not** included.
 
-Based on the original [ESP32-DIV firmware by CiferTech](https://github.com/cifer-tech/ESP32-DIV) (MIT), with the M5SHARK ctOS interface, additional tools, and a full QA toolchain. Binaries for end users live in this repo's [Releases](https://github.com/M5Shark/SHARKDIV-firmware/releases).
+Based on the original [ESP32-DIV firmware by CiferTech](https://github.com/cifer-tech/ESP32-DIV) (MIT), with the SHARKDIV brand interface, additional tools, and a full QA toolchain. Binaries for end users live in this repo's [Releases](https://github.com/M5Shark/SHARKDIV-firmware/releases).
 
 ## Feature map
 
@@ -24,7 +24,7 @@ Based on the original [ESP32-DIV firmware by CiferTech](https://github.com/cifer
 | IR | Record, Saved Profile, Universal Controller, TV Power, IR Repeater |
 | Tools | Serial Monitor, OTA Update, Touch Calibration, SD File Manager, Snake, Reaction Test, QR Code, **user apps** |
 
-Extras: ctOS-style Skull Rain boot animation, phosphor-green boot palette, 4 themes, touch-first UI (tap latching — no physical buttons needed), battery fuel gauge, SD-config settings, and a **remote-test serial console** (`u/d/l/r/k` tap, `s` state, `b` battery) so the whole device can be driven by automated tooling.
+Extras: 1-bit glitch boot reel with the SHARKDIV logo splash, phosphor-green brand palette, 4 themes, touch-first UI (tap latching — no physical buttons needed), battery fuel gauge, SD-config settings, and a **remote-test serial console** (`u/d/l/r/k` tap, `s` state, `b` battery) so the whole device can be driven by automated tooling.
 
 ## Flash from the browser
 
