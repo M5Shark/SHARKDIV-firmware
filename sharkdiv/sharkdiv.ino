@@ -674,29 +674,36 @@ static void drawTouchNavBar() {
 
   layoutTouchNavBtns();
 
-  tft.fillRect(0, barY, barW, barH, UI_FG);
+  // Darker band so the keys read as raised pills sitting on it.
+  tft.fillRect(0, barY, barW, barH, UI_LABLE);
   tft.drawFastHLine(0, barY, barW, UI_LINE);
 
-  // Mark the centre (primary) key with a 2 px accent cap on its top edge, so
-  // Home/Exit reads as the main action while the arrow keys stay quiet.
-  const auto& ctr = s_touchNavBtns[2];
-  tft.drawFastHLine(ctr.x, barY, ctr.w, UI_ICON);
-  tft.drawFastHLine(ctr.x, barY + 1, ctr.w, UI_ICON);
-
+  const int16_t padX = 4, padY = 5, pr = 7;
   for (int i = 0; i < 5; ++i) {
     const auto& b = s_touchNavBtns[i];
-    if (i > 0) {
-      tft.drawFastVLine(b.x, barY + 3, barH - 6, UI_LINE);
+    const bool primary = (i == 2);
+    const bool inactiveSlot = s_touchNavLabelsConfigured && !s_touchNavLabels[i];
+    const int16_t px = b.x + padX, py = b.y + padY;
+    const int16_t pw = b.w - padX * 2, ph = b.h - padY * 2;
+
+    // Pill surface: the centre (Home/Exit) key fills accent; the rest sit on a
+    // raised dark surface with a hairline border.
+    if (primary) {
+      tft.fillRoundRect(px, py, pw, ph, pr, UI_ICON);
+    } else {
+      tft.fillRoundRect(px, py, pw, ph, pr, UI_FG);
+      tft.drawRoundRect(px, py, pw, ph, pr, UI_LINE);
     }
+
+    const uint16_t fg = primary ? TFT_BLACK : (inactiveSlot ? LIGHT_GRAY : UI_TEXT);
+    const uint16_t bg = primary ? UI_ICON : UI_FG;
 
     if (s_touchNavLabels[i] && s_touchNavLabels[i][0]) {
       tft.setTextDatum(MC_DATUM);
-      const uint16_t txtColor = (i == 2) ? UI_ICON : UI_TEXT;
-      tft.setTextColor(txtColor, UI_FG);
-      const String fit = fitTouchNavLabel(s_touchNavLabels[i], b.w - 10);
-      // Size 2 when it fits — labels readable at arm's length; the centre
-      // slot (Exit/Home) always draws bold.
-      if (i == 2 || tft.textWidth(fit, 2) <= b.w - 10) {
+      tft.setTextColor(fg, bg);
+      const String fit = fitTouchNavLabel(s_touchNavLabels[i], pw - 8);
+      // Size 2 when it fits — readable at arm's length; the primary key is bold.
+      if (primary || tft.textWidth(fit, 2) <= pw - 8) {
         tft.drawString(fit, b.x + b.w / 2, b.y + b.h / 2, 2);
       } else {
         tft.drawString(fit, b.x + b.w / 2, b.y + b.h / 2, 1);
@@ -704,10 +711,8 @@ static void drawTouchNavBar() {
     } else {
       const int ix = b.x + (b.w - kIconSize) / 2;
       const int iy = b.y + (b.h - kIconSize) / 2;
-      const bool inactiveSlot = s_touchNavLabelsConfigured && !s_touchNavLabels[i];
       const unsigned char* icon = inactiveSlot ? bitmap_icon_dots : kIcons[i];
-      const uint16_t iconColor = inactiveSlot ? LIGHT_GRAY : ((i == 2) ? UI_ICON : UI_TEXT);
-      tft.drawBitmap(ix, iy, icon, kIconSize, kIconSize, iconColor);
+      tft.drawBitmap(ix, iy, icon, kIconSize, kIconSize, fg);
     }
   }
 
@@ -1045,16 +1050,16 @@ void displaySubmenu() {
 
         for (int i = 0; i < active_submenu_size; i++) {
             const int yPos = submenuItemY(i);
-            const bool isBack = (i == active_submenu_size - 1);
+            const bool sel = (i == current_submenu_index);
+            const uint16_t fg = sel ? TFT_BLACK : UI_TEXT;
+            const uint16_t bg = sel ? UI_ICON : UI_FG;
 
-            tft.setTextColor(UI_TEXT, UI_BG);
+            drawSharkRowRail(yPos, 28, sel);
+            tft.setTextColor(fg, bg);
             if (active_submenu_icons[i]) {
-                tft.drawBitmap(10, yPos, active_submenu_icons[i], 16, 16, UI_TEXT);
+                tft.drawBitmap(12, yPos + 6, active_submenu_icons[i], 16, 16, fg);
             }
-            tft.setCursor(30, yPos);
-            if (!isBack) {
-                tft.print("| ");
-            }
+            tft.setCursor(34, yPos + 6);
             tft.print(active_submenu_items[i]);
         }
 
@@ -1065,25 +1070,20 @@ void displaySubmenu() {
     if (last_submenu_index != current_submenu_index) {
         if (last_submenu_index >= 0) {
             const int prev_yPos = submenuItemY(last_submenu_index);
-            const bool prevBack = (last_submenu_index == active_submenu_size - 1);
-
-            tft.fillRect(0, prev_yPos, tft.width(), 28, UI_BG);
             drawSharkRowRail(prev_yPos, 28, false);
-            tft.setTextColor(UI_TEXT, UI_BG);
-            tft.drawBitmap(10, prev_yPos, active_submenu_icons[last_submenu_index], 16, 16, UI_TEXT);
-            tft.setCursor(30, prev_yPos);
+            tft.setTextColor(UI_TEXT, UI_FG);
+            if (active_submenu_icons[last_submenu_index])
+                tft.drawBitmap(12, prev_yPos + 6, active_submenu_icons[last_submenu_index], 16, 16, UI_TEXT);
+            tft.setCursor(34, prev_yPos + 6);
             tft.print(active_submenu_items[last_submenu_index]);
         }
 
         const int new_yPos = submenuItemY(current_submenu_index);
-        const bool newBack = (current_submenu_index == active_submenu_size - 1);
-
-        tft.fillRect(0, new_yPos, tft.width(), 28, UI_BG);
         drawSharkRowRail(new_yPos, 28, true);
-        tft.setTextColor(UI_ICON, UI_BG);
-        tft.drawBitmap(10, new_yPos, active_submenu_icons[current_submenu_index], 16, 16, UI_ICON);
-        tft.setCursor(30, new_yPos);
-        tft.print("> ");
+        tft.setTextColor(TFT_BLACK, UI_ICON);
+        if (active_submenu_icons[current_submenu_index])
+            tft.drawBitmap(12, new_yPos + 6, active_submenu_icons[current_submenu_index], 16, 16, TFT_BLACK);
+        tft.setCursor(34, new_yPos + 6);
         tft.print(active_submenu_items[current_submenu_index]);
 
         last_submenu_index = current_submenu_index;
@@ -1112,12 +1112,15 @@ void displayPagedSubmenu() {
         tft.fillScreen(UI_BG);
         for (int i = 0; i < featureCount; i++) {
             const int yPos = 30 + i * 30;
-            tft.setTextColor(UI_TEXT, UI_BG);
+            const bool sel = (i == current_submenu_index);
+            const uint16_t fg = sel ? TFT_BLACK : UI_TEXT;
+            const uint16_t bg = sel ? UI_ICON : UI_FG;
+            drawSharkRowRail(yPos, 28, sel);
+            tft.setTextColor(fg, bg);
             if (active_submenu_icons[i]) {
-                tft.drawBitmap(10, yPos, active_submenu_icons[i], 16, 16, UI_TEXT);
+                tft.drawBitmap(12, yPos + 6, active_submenu_icons[i], 16, 16, fg);
             }
-            tft.setCursor(30, yPos);
-            tft.print("| ");
+            tft.setCursor(34, yPos + 6);
             tft.print(active_submenu_items[i]);
         }
         drawPagedFooterButtons();
@@ -1130,21 +1133,20 @@ void displayPagedSubmenu() {
         if (last_submenu_index >= 0 && last_submenu_index < featureCount) {
             const int prev_yPos = 30 + last_submenu_index * 30;
             drawSharkRowRail(prev_yPos, 28, false);
-            tft.fillRect(30, prev_yPos, tft.width() - 30, 24, UI_BG);
-            tft.setTextColor(UI_TEXT, UI_BG);
-            tft.drawBitmap(10, prev_yPos, active_submenu_icons[last_submenu_index], 16, 16, UI_TEXT);
-            tft.setCursor(30, prev_yPos);
+            tft.setTextColor(UI_TEXT, UI_FG);
+            if (active_submenu_icons[last_submenu_index])
+                tft.drawBitmap(12, prev_yPos + 6, active_submenu_icons[last_submenu_index], 16, 16, UI_TEXT);
+            tft.setCursor(34, prev_yPos + 6);
             tft.print(active_submenu_items[last_submenu_index]);
         }
 
         if (current_submenu_index >= 0 && current_submenu_index < featureCount) {
             const int new_yPos = 30 + current_submenu_index * 30;
             drawSharkRowRail(new_yPos, 28, true);
-            tft.fillRect(30, new_yPos, tft.width() - 30, 24, UI_BG);
-            tft.setTextColor(UI_ICON, UI_BG);
-            tft.drawBitmap(10, new_yPos, active_submenu_icons[current_submenu_index], 16, 16, UI_ICON);
-            tft.setCursor(30, new_yPos);
-            tft.print("> ");
+            tft.setTextColor(TFT_BLACK, UI_ICON);
+            if (active_submenu_icons[current_submenu_index])
+                tft.drawBitmap(12, new_yPos + 6, active_submenu_icons[current_submenu_index], 16, 16, TFT_BLACK);
+            tft.setCursor(34, new_yPos + 6);
             tft.print(active_submenu_items[current_submenu_index]);
             s_pagedFooterFocus = -1;
         } else if (current_submenu_index == pagedBackBtnIndex()) {
@@ -1189,10 +1191,11 @@ void displayOtherMenuGrid() {
             int x_position = (column == 0) ? X_OFFSET_LEFT : X_OFFSET_RIGHT;
             int y_position = Y_START + row * Y_SPACING;
 
-            drawSharkTile(x_position, y_position, 100, 60, i == current_submenu_index);
-            tft.drawBitmap(x_position + 42, y_position + 10, other_submenu_icons[i], 16, 16, UI_ICON);
+            const bool sel = (i == current_submenu_index);
+            drawSharkTile(x_position, y_position, 100, 60, sel);
+            tft.drawBitmap(x_position + 42, y_position + 10, other_submenu_icons[i], 16, 16, sel ? TFT_BLACK : UI_ICON);
 
-            tft.setTextColor(UI_TEXT, UI_FG);
+            tft.setTextColor(sel ? TFT_BLACK : UI_TEXT, sel ? UI_ICON : UI_FG);
             int textWidth = tft.textWidth(other_submenu_items[i]);
             int textX = x_position + (100 - textWidth) / 2;
             int textY = y_position + 30;
@@ -1231,9 +1234,9 @@ void displayOtherMenuGrid() {
 
         drawSharkTile(x_position, y_position, 100, 60, true);
 
-        tft.setTextColor(UI_ICON, UI_FG);
+        tft.setTextColor(TFT_BLACK, UI_ICON);
         tft.drawBitmap(x_position + 42, y_position + 10, other_submenu_icons[current_submenu_index],
-                       16, 16, SELECTED_ICON_COLOR);
+                       16, 16, TFT_BLACK);
         int textWidth = tft.textWidth(other_submenu_items[current_submenu_index]);
         int textX = x_position + (100 - textWidth) / 2;
         int textY = y_position + 30;
@@ -1264,16 +1267,9 @@ void displayMenu() {
   setTouchButtonInputEnabled(false);
   applyThemeToPalette(settings().theme);
 
-  // Home gets a slim brand strip so it reads as the root screen.
-  tft.fillRect(0, 0, tft.width(), 22, TFT_BLACK);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(UI_ICON, TFT_BLACK);
-  tft.drawString("SHARKDIV", 8, 11, 2);
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-  tft.drawString(String("v") + ESP32DIV_VERSION + "  //", tft.width() - 8, 12, 1);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawFastHLine(0, 22, tft.width(), UI_LINE);
+  // Home header is the shared status bar (drawn at the end of this function
+  // with the accent spine + underline); no separate band, which the status
+  // bar would only paint over.
 
 const uint16_t icon_colors[NUM_MENU_ITEMS] = {
   UI_ICON,
@@ -1301,14 +1297,18 @@ const uint16_t icon_colors[NUM_MENU_ITEMS] = {
             int x_position = (column == 0) ? X_OFFSET_LEFT : X_OFFSET_RIGHT;
             int y_position = Y_START + row * Y_SPACING;
 
-            drawSharkTile(x_position, y_position, 100, 60, i == current_menu_index);
+            const bool sel = (i == current_menu_index);
+            const uint16_t ink = sel ? TFT_BLACK : UI_TEXT;
+            const uint16_t cardBg = sel ? UI_ICON : UI_FG;
+
+            drawSharkTile(x_position, y_position, 100, 60, sel);
             if (i == MAIN_MENU_OTHER_IDX) {
-                drawMainMenuOtherTripleIcons(x_position, y_position, icon_colors[i]);
+                drawMainMenuOtherTripleIcons(x_position, y_position, sel ? TFT_BLACK : icon_colors[i]);
             } else {
-                tft.drawBitmap(x_position + 42, y_position + 10, bitmap_icons[i], 16, 16, icon_colors[i]);
+                tft.drawBitmap(x_position + 42, y_position + 10, bitmap_icons[i], 16, 16, sel ? TFT_BLACK : icon_colors[i]);
             }
 
-            tft.setTextColor(UI_TEXT, UI_FG);
+            tft.setTextColor(ink, cardBg);
             int textWidth = tft.textWidth(menu_items[i]);
             int textX = x_position + (100 - textWidth) / 2;
             int textY = y_position + 30;
@@ -1349,11 +1349,11 @@ const uint16_t icon_colors[NUM_MENU_ITEMS] = {
 
         drawSharkTile(x_position, y_position, 100, 60, true);
 
-        tft.setTextColor(UI_ICON, UI_FG);
+        tft.setTextColor(TFT_BLACK, UI_ICON);
         if (current_menu_index == MAIN_MENU_OTHER_IDX) {
-            drawMainMenuOtherTripleIcons(x_position, y_position, SELECTED_ICON_COLOR);
+            drawMainMenuOtherTripleIcons(x_position, y_position, TFT_BLACK);
         } else {
-            tft.drawBitmap(x_position + 42, y_position + 10, bitmap_icons[current_menu_index], 16, 16, SELECTED_ICON_COLOR);
+            tft.drawBitmap(x_position + 42, y_position + 10, bitmap_icons[current_menu_index], 16, 16, TFT_BLACK);
         }
         int textWidth = tft.textWidth(menu_items[current_menu_index]);
         int textX = x_position + (100 - textWidth) / 2;
@@ -1370,7 +1370,7 @@ const uint16_t icon_colors[NUM_MENU_ITEMS] = {
         }
 #endif
     }
-    drawStatusBar(currentBatteryVoltage, true);
+    drawStatusBar(currentBatteryVoltage, true, true);
 }
 
 void handleWiFiSubmenuButtons() {
@@ -5356,27 +5356,30 @@ static void runFlockTileApp() {
       setTouchNavLabels(nullptr, nullptr, "Home", nullptr, nullptr);
       featureClearContent(TFT_BLACK);
       drawStatusBar(readBatteryVoltage(), true);
+      tft.fillRect(0, 22, tft.width(), 20, UI_LABLE);
+      tft.fillRect(0, 22, 3, 20, UI_ICON);
       tft.setTextDatum(ML_DATUM);
-      tft.setTextColor(UI_ICON, TFT_BLACK);
-      tft.drawString("// FLOCK", 6, 28, 2);
-      tft.drawFastHLine(0, 38, tft.width(), UI_LINE);
+      tft.setTextColor(UI_TEXT, UI_LABLE);
+      tft.drawString("FLOCK", 11, 32, 2);
+      tft.setTextDatum(MR_DATUM);
+      tft.setTextColor(UI_DIM_TEXT, UI_LABLE);
+      tft.drawString("passive", tft.width() - 8, 32, 1);
+      tft.drawFastHLine(0, 42, tft.width(), UI_ICON);
       tft.setTextDatum(TL_DATUM);
       // Card grid: 2 columns of tiles like the home screen.
       const int cols = 2;
       const int cardW = (tft.width() - 24) / cols;
-      const int cardH = 52;
+      const int cardH = 36;               // 9 cards in 5 rows fit above the nav bar
       for (int i = 0; i < listCount; i++) {
         const int cx = 8 + (i % cols) * (cardW + 8);
-        const int cy = 48 + (i / cols) * (cardH + 8);
+        const int cy = 48 + (i / cols) * (cardH + 7);
         const bool sel = (i == cursor);
         drawSharkTile(cx, cy, cardW, cardH, sel);
         tft.setTextDatum(MC_DATUM);
-        tft.setTextColor(sel ? UI_ICON : UI_TEXT, UI_FG);
-        tft.drawString(kFlockTools[i].name, cx + cardW / 2 + 3, cy + cardH / 2, 2);
+        tft.setTextColor(sel ? TFT_BLACK : UI_TEXT, sel ? UI_ICON : UI_FG);
+        tft.drawString(kFlockTools[i].name, cx + cardW / 2, cy + cardH / 2, 2);
         tft.setTextDatum(TL_DATUM);
       }
-      tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-      tft.drawString("tap a card - Home to exit", 8, tft.height() - 66, 1);
       setupTouchscreen();
       redrawTouchButtonBar();
     }
@@ -5419,10 +5422,10 @@ static void runFlockTileApp() {
       }
       const int cols2 = 2;
       const int cardW2 = (tft.width() - 24) / cols2;
-      const int cardH2 = 52;
+      const int cardH2 = 36;              // must match the draw geometry above
       for (int i = 0; i < listCount; i++) {
         const int cx = 8 + (i % cols2) * (cardW2 + 8);
-        const int cy = 48 + (i / cols2) * (cardH2 + 8);
+        const int cy = 48 + (i / cols2) * (cardH2 + 7);
         if (tx >= cx && tx <= cx + cardW2 && ty >= cy && ty <= cy + cardH2) {
           launchItem(i);
           feature_active = true;
