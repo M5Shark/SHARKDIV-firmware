@@ -384,13 +384,13 @@ static void drawLayer(const GLayer& L, uint16_t col, float scale) {
 // Fast scaled blit of a 1-bit bitmap (row-sampled, pushed as rects).
 // dw can reach ~1000 px at the reel's 9x slam — pixel-by-pixel would take
 // seconds, rows via pushRect take milliseconds.
-static uint16_t s_blitRow[1120];  // 120px mark at 9x slam = 1080 wide
+static uint16_t s_blitRow[1280];  // 132px mark at 9x slam = 1188 wide
 
 static void blitScaled1bit(const uint8_t* bmp, int16_t bw, int16_t bh,
                            int16_t cx, int16_t cy, float scale, uint16_t col) {
   const int16_t dw = (int16_t)(bw * scale);
   const int16_t dh = (int16_t)(bh * scale);
-  if (dw <= 0 || dh <= 0 || dw > 1120) return;
+  if (dw <= 0 || dh <= 0 || dw > 1280) return;
   const int16_t x0 = cx - dw / 2;
   const int16_t y0 = cy - dh / 2;
   const int16_t rowBytes = (bw + 7) / 8;
