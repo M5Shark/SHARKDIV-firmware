@@ -18,7 +18,6 @@ struct UserApp {
 
 // Register apps here (the MCP app builder appends to this list):
 #define SHARKDIV_APP_LIST \
-  SHARKDIV_APP("Demo App", DemoApp::appSetup, DemoApp::appLoop, DemoApp::exit) \
 
 #define SHARKDIV_APP(name, setupFn, loopFn, exitFn) \
   { name, setupFn, loopFn, exitFn },
