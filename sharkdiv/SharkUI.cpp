@@ -338,17 +338,21 @@ void playReel() {
 // glitch blocks, then a dot-matrix fade. Phosphor green palette; the
 // M5SHARK logo reveal follows in playSharkBoot.
 
+// ═══════════════════════════════════════════ Skull Glitch boot ═══
+// Frame-accurate port of the user's Watch Dogs 2 reel (docs/skull-glitch/):
+// 33 frames at ~40 ms, stepping on the reel's own keyframes. Every SVG
+// layer from the HTML plays as generated rect tables; the skull sprite
+// sheet and hourglass poses are bitmaps; the wordmark slam uses the reel's
+// translate/scale choreography via a scaled sprite blit. Phosphor green.
 namespace GlitchBoot {
 
 #include "GlitchAssets.h"
 
-// Deterministic noise (same job the ctOS art's hash did).
 static uint16_t ghHash(uint16_t a, uint16_t b, uint16_t salt) {
   uint32_t h = (uint32_t)a * 73856093u ^ (uint32_t)b * 19349663u ^ (uint32_t)salt * 83492791u;
   h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
   return (uint16_t)h;
 }
-#define wdHash ghHash
 
 static const uint8_t* const kPoses[8] = {
   glitch_skull_p0, glitch_skull_p1, glitch_skull_p2, glitch_skull_p3,
@@ -356,134 +360,172 @@ static const uint8_t* const kPoses[8] = {
 };
 static const uint8_t* const kHour[3] = { glitch_hour_0, glitch_hour_1, glitch_hour_2 };
 
-static constexpr uint16_t kPaper = 0x9FF3;   // pale green room
+static constexpr uint16_t kPaper = 0x9FF3;   // pale green "white room"
 static constexpr uint16_t kInk = 0x00E0;     // dark green ink on paper
 static constexpr uint16_t kGreen = 0x07E0;   // phosphor green on black
 static constexpr uint16_t kDim = 0x03E0;
 
-static void slabs(uint16_t col, int fromY, int toY) {
-  // Ragged-edge horizontal slabs, like the reel's pixel wipe edges.
-  for (int y = fromY; y < toY; y += 8) {
-    const int jitter = (wdHash(y, 7, 0xA5A5) % 5) - 2;
-    tft.fillRect(jitter, y, tft.width() - jitter, 8, col);
+// stage: viewBox space (160x90 or 80x45) mapped to a 240x270 letterbox
+static constexpr int16_t ST_Y = 25;
+static constexpr int16_t ST_H = 270;
+
+static void drawLayer(const GLayer& L, uint16_t col, float scale) {
+  for (uint16_t i = 0; i < L.count; i++) {
+    GRect r;
+    memcpy_P(&r, &L.rects[i], sizeof(r));
+    tft.fillRect(ST_Y >= 0 ? (int16_t)(r.x * scale) : r.x * scale,
+                 ST_Y + (int16_t)(r.y * (ST_H / (float)L.vbh)),
+                 (int16_t)(r.w * scale) + 1,
+                 (int16_t)ceilf(ST_H / (float)L.vbh),
+                 col);
   }
 }
 
-static void drawPose(int p, int16_t x, int16_t y, uint16_t col) {
-  tft.drawBitmap(x, y, kPoses[p], 160, 90, col);
-}
-
-static void beam(uint16_t col) {
-  for (int i = 0; i < 3; i++) {
-    tft.fillTriangle(0, 20 + i * 40, 90 + i * 30, 60 + i * 20,
-                     0, 110 + i * 30, col);
+// scaled blit of a rendered wordmark sprite (the reel's 9x -> 1 zoom)
+static void blitScaled(TFT_eSprite& spr, float cx, float cy, float scale) {
+  const int16_t sw = spr.width();
+  const int16_t sh = spr.height();
+  const int16_t dw = (int16_t)(sw * scale);
+  const int16_t dh = (int16_t)(sh * scale);
+  const int16_t x0 = (int16_t)cx - dw / 2;
+  const int16_t y0 = (int16_t)cy - dh / 2;
+  for (int16_t y = 0; y < dh; y++) {
+    const int16_t sy = (y * sh) / dh;
+    for (int16_t x = 0; x < dw; x++) {
+      const int16_t sx = (x * sw) / dw;
+      if ((sx | sy) < 0) continue;
+      const uint16_t c = spr.readPixel(sx, sy);
+      if (c != TFT_BLACK) tft.drawPixel(x0 + x, y0 + y, c);
+    }
   }
 }
 
-static void glitchBlocks(int n, uint16_t seed) {
-  for (int i = 0; i < n; i++) {
-    const uint16_t h = wdHash(i, seed, 0x3C3C);
-    const int16_t x = h % (tft.width() - 40);
-    const int16_t y = (h >> 6) % (tft.height() - 24);
-    tft.fillRect(x, y, 18 + (h % 46), 6 + (h % 10),
-                 (i & 1) ? kGreen : kPaper);
-  }
-}
+// reel keyframes: wordmark slam (f19..f29): {dx%, dy%, scale} straight
+// from the CSS transform table, mapped onto the portrait stage.
+static const float kSlam[11][3] = {
+  { 9, 156, 9.0f }, { 6, 138, 8.0f }, { 8, 108, 6.5f }, { 5, 86, 5.2f },
+  { 4, 56, 4.1f }, { 3, 30, 2.5f }, { 1, 13, 1.7f }, { -3, -5, 1.09f },
+  { -2, -5, 1.0f }, { -3, -7, 0.98f }, { -4, -7, 0.97f },
+};
 
 void run() {
   const int16_t W = tft.width();
   const int16_t H = tft.height();
-  const int16_t sx = (W - 160) / 2;
-  const int16_t sy = 110;
+  const int16_t cx = W / 2;
+  const int16_t cy = ST_Y + ST_H / 2;
+  const float s160 = W / 160.0f;    // 160-wide viewBox scale
+  const float s80 = W / 80.0f;      // 80-wide viewBox scale
 
-  // f0: pale-green wipe with ragged slabs.
   tft.fillScreen(TFT_BLACK);
-  for (int i = 0; i < 4; i++) { slabs(kPaper, 0, H); delay(30); }
-  delay(90);
 
-  // f1-f5: hourglass tumbles across the room, debris flickers.
-  for (int p = 0; p < 3; p++) {
-    tft.fillRect(0, 0, W, H, kPaper);
-    const int hx = (W - 45) / 2 + (p - 1) * 26;
-    const int hy = 120 + (p - 1) * 18;
-    tft.drawBitmap(hx, hy, kHour[p], 45, 45, kInk);
-    for (int i = 0; i < 6; i++) {
-      const uint16_t n = wdHash(i, p + 11, 0x5A5A);
-      tft.fillRect(n % W, 60 + (n >> 6) % 180, 4, 4, kInk);
+  // wordmark sprite, rendered once (green on transparent=black)
+  TFT_eSprite wm(&tft);
+  wm.setColorDepth(16);
+  wm.createSprite(104, 18);
+  wm.fillSprite(TFT_BLACK);
+  wm.setTextDatum(MC_DATUM);
+  wm.setTextColor(kGreen, TFT_BLACK);
+  wm.drawString("SHARKDIV", 52, 9, 2);
+  wm.setTextDatum(TL_DATUM);
+
+  // skull pose at reel frame (holds between keyframes): f6..f18
+  auto skullPoseAt = [](int f) -> int {
+    if (f <= 6) return 0;
+    if (f == 7 || f == 8) return 1;
+    if (f >= 9 && f <= 10) return 2;
+    if (f >= 11 && f <= 12) return 3;
+    if (f >= 13 && f <= 15) return 4;
+    if (f == 16) return 5;
+    if (f == 17) return 6;
+    return 7;  // f18 fragments
+  };
+
+  for (int f = 0; f < 33; f++) {
+    // ── stage base ──
+    if (f <= 5) {
+      tft.fillScreen(kPaper);
+    } else {
+      tft.fillScreen(TFT_BLACK);
     }
-    delay(170);
-  }
 
-  // f5-f6: black blocks rise from the bottom, swallow the room.
-  for (int row = 0; row < 14; row++) {
-    const int y = H - (row + 1) * 22;
-    const uint16_t n = wdHash(row, 99, 0xC3C3);
-    tft.fillRect(-(n % 10), y, W + 20, 22, TFT_BLACK);
-    delay(42);
-  }
-  tft.fillScreen(TFT_BLACK);
-  delay(60);
-
-  // f6-f18: the skull swings through its poses.
-  static const int8_t swing[6] = { -18, 10, -6, 14, -2, 0 };
-  for (int p = 0; p < 5; p++) {
-    tft.fillRect(0, 60, W, 190, TFT_BLACK);
-    drawPose(p, sx + swing[p], sy, kGreen);
-    delay(150);
-  }
-
-  // f18: shatter — fragments, light beam, glitch blocks.
-  tft.fillRect(0, 60, W, 190, TFT_BLACK);
-  drawPose(4, sx, sy, kGreen);
-  beam(kPaper);
-  delay(60);
-  for (int p = 5; p < 8; p++) {
-    tft.fillRect(0, 60, W, 190, TFT_BLACK);
-    drawPose(p, sx + (p - 6) * 10, sy + (p - 5) * 8, kGreen);
-    beam(kDim);
-    glitchBlocks(5, p * 31);
-    delay(95);
-  }
-
-  // f19-f26: SHARKDIV slams in huge and steps down to place.
-  static const uint8_t sizes[8] = { 7, 6, 5, 4, 3, 2, 2, 2 };
-  for (int i = 0; i < 8; i++) {
-    tft.fillRect(0, 60, W, 200, TFT_BLACK);
-    // stepped diagonal line behind the wordmark (reel's stepline)
-    for (int k = 0; k < 26; k++) {
-      tft.fillRect(30 + k * 7, 90 + k * 6, 4, 8, kDim);
+    // f0: the ragged wipe shape, one frame
+    if (f == 0) {
+      drawLayer(gl_wipe, kPaper, s80);
     }
-    const int8_t jx = (i < 6) ? (wdHash(i, 5, 0x77) % 10) - 5 : 0;
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(kGreen, TFT_BLACK);
-    tft.drawString("SHARKDIV", W / 2 + jx, 160, sizes[i]);
-    tft.setTextDatum(TL_DATUM);
-    delay(i < 6 ? 65 : 110);
-  }
 
-  // f28: glitch beat over the settled wordmark.
-  glitchBlocks(7, 777);
-  beam(kGreen);
-  delay(90);
-  tft.fillRect(0, 60, W, 200, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(kGreen, TFT_BLACK);
-  tft.drawString("SHARKDIV", W / 2, 160, 2);
-  tft.setTextDatum(TL_DATUM);
-  delay(140);
+    // f1-f5: hourglass tumbles + debris flashes
+    if (f >= 1 && f <= 5) {
+      const int hp = (f <= 2) ? 0 : (f <= 4 ? 1 : 2);
+      tft.drawBitmap(cx - 22, cy - 22, kHour[hp], 45, 45, kInk);
+      if (f == 1 || f == 2) drawLayer(gl_debris1, kInk, s160);
+      if (f == 3 || f == 4) drawLayer(gl_debris3, kInk, s160);
+    }
 
-  // f30-f32: dot-matrix fade — everything drops into dim dots.
-  for (int pass = 0; pass < 3; pass++) {
-    for (int y = 40; y < H - 40; y += 6) {
-      for (int x = 6; x < W - 6; x += 6) {
-        if ((wdHash(x, y, 0xD0D0) & 3) >= pass) {
-          tft.fillRect(x, y, 2, 2, kDim);
+    // f5: black blocks skyline rises (one frame flash)
+    if (f == 5) {
+      drawLayer(gl_blocks, TFT_BLACK, s80);
+    }
+
+    // f6-f18: the skull swings through its poses
+    if (f >= 6 && f <= 18) {
+      const int p = skullPoseAt(f);
+      // swing offset per the reel's motion (bigger early, settles later)
+      const int8_t swing = (f <= 7) ? -12 : (f <= 11 ? 8 : (f <= 15 ? -4 : 0));
+      const int16_t sx = cx - 80 + swing;
+      const int16_t sy = cy - 45;
+      tft.drawBitmap(sx, sy, kPoses[p], 160, 90, kGreen);
+    }
+
+    // f18: first beam + corner blocks (over the shattering skull)
+    if (f == 18) {
+      drawLayer(gl_beam18a, kPaper, s160);
+      drawLayer(gl_corner18, kGreen, s80);
+    }
+    if (f == 19) drawLayer(gl_beam19, kPaper, s160);
+    if (f == 20) drawLayer(gl_beam20, kPaper, s160);
+
+    // f19-f29: wordmark slam zoom (reel transform table)
+    if (f >= 19 && f <= 29) {
+      const int k = f - 19;
+      const float dx = kSlam[k][0] * (W / 100.0f);
+      const float dy = kSlam[k][1] * (ST_H / 100.0f);
+      // stepline behind the settled logo (f26-f28)
+      if (f >= 26 && f <= 28) {
+        drawLayer(gl_stepline, kDim, s160);
+      }
+      blitScaled(wm, cx + dx, cy + dy, kSlam[k][2]);
+    }
+
+    // f28: beam + corner glitch over the logo
+    if (f == 28) {
+      drawLayer(gl_beam28, kPaper, s160);
+    }
+    // f29: beam + full glitch block set
+    if (f == 29) {
+      drawLayer(gl_beam29, kPaper, s160);
+      drawLayer(gl_glitch29, kGreen, s80);
+    }
+
+    // f30-f32: dot-matrix outro — dim veil, ascii skull, dot grid
+    if (f >= 30) {
+      tft.fillScreen(TFT_BLACK);
+      tft.drawBitmap((W - GLITCH_ASCII_W) / 2, (H - GLITCH_ASCII_H) / 2,
+                     glitch_ascii, GLITCH_ASCII_W, GLITCH_ASCII_H, kDim);
+      // dot veil thickens each frame
+      for (int16_t y = 0; y < H; y += 6) {
+        for (int16_t x = 0; x < W; x += 6) {
+          if ((ghHash(x, y, 0xD0D0) & 3) >= (f - 29)) {
+            tft.fillRect(x, y, 3, 3, TFT_BLACK);
+          }
         }
       }
     }
-    delay(70);
+
+    delay(f >= 30 ? 60 : 42);
   }
-  delay(180);
+
+  delay(200);
+  wm.deleteSprite();
   tft.fillScreen(TFT_BLACK);
 }
 
