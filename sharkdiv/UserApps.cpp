@@ -6,7 +6,7 @@
 #include "config.h"
 #include "utils.h"
 #include "Touchscreen.h"
-#include "flock_menu.cpp"
+#include "flock_menu.h"
 // === generated includes (app builder writes below this line) ===
 #include "UserApp_signal_logger.cpp"
 

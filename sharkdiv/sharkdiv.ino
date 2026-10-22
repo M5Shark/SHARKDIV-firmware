@@ -5256,7 +5256,7 @@ void handleButtons() {
                         if (current_menu_index == 3) {
                             handleSettingsSubmenuButtons();
                         } else if (current_menu_index == 7) {
-                            handleAboutPage();
+                            runFlockTileApp();
                         } else {
                             updateActiveSubmenu();
 
@@ -5286,6 +5286,27 @@ void handleButtons() {
             }
         }
     }
+}
+
+static void runFlockTileApp() {
+    feature_active = true;
+    feature_exit_requested = false;
+    setTouchButtonInputEnabled(true);
+    flock_menu::appSetup();
+    while (feature_active && !feature_exit_requested) {
+        flock_menu::appLoop();
+        if (featureExitButtonPressed()) break;
+    }
+    flock_menu::exit();
+    delay(400);   // let the exit tap expire so the tile cannot relaunch
+    setTouchButtonInputEnabled(false);
+    setTouchNavLabels(nullptr, nullptr, nullptr, nullptr, nullptr);
+    resetTouchNavHeldState();
+    feature_active = false;
+    feature_exit_requested = false;
+    is_main_menu = false;
+    displayMenu();
+    delay(200);
 }
 
 void setup() {
