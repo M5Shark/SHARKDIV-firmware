@@ -57,7 +57,7 @@ const char *menu_items[NUM_MENU_ITEMS] = {
     "Bluetooth",
     "SubGHz",
     "Tools",
-    "Apps"};
+    "Flock"};
 
 const unsigned char *bitmap_icons[NUM_MENU_ITEMS] = {
     bitmap_icon_wifi,
@@ -5352,7 +5352,7 @@ static void runFlockTileApp() {
       drawStatusBar(readBatteryVoltage(), true);
       tft.setTextDatum(ML_DATUM);
       tft.setTextColor(UI_ICON, TFT_BLACK);
-      tft.drawString("// APPS", 6, 28, 2);
+      tft.drawString("// FLOCK", 6, 28, 2);
       tft.drawFastHLine(0, 38, tft.width(), UI_LINE);
       tft.setTextDatum(TL_DATUM);
       // Card grid: 2 columns of tiles like the home screen.
