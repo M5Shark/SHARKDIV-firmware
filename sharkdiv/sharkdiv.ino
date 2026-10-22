@@ -57,7 +57,7 @@ const char *menu_items[NUM_MENU_ITEMS] = {
     "Bluetooth",
     "SubGHz",
     "Tools",
-    "Flock"};
+    "Apps"};
 
 const unsigned char *bitmap_icons[NUM_MENU_ITEMS] = {
     bitmap_icon_wifi,
@@ -5289,24 +5289,119 @@ void handleButtons() {
 }
 
 static void runFlockTileApp() {
-    feature_active = true;
-    feature_exit_requested = false;
-    setTouchButtonInputEnabled(true);
-    flock_menu::appSetup();
-    while (feature_active && !feature_exit_requested) {
+  // The Apps tile: a launcher list. Flock Scanner plus every registered
+  // user app; new apps built with the app builder appear here
+  // automatically. Tapping a row or SELECT launches; Exit returns home.
+  const int flockEntries = 1;                       // Flock Scanner first
+  const int listCount = flockEntries + userAppCount();
+
+  auto launchItem = [&](int idx) {
+    if (idx == 0) {
+      feature_active = true;
+      feature_exit_requested = false;
+      setTouchButtonInputEnabled(true);
+      flock_menu::appSetup();
+      while (feature_active && !feature_exit_requested) {
         flock_menu::appLoop();
         if (featureExitButtonPressed()) break;
+      }
+      flock_menu::exit();
+    } else {
+      const UserApp& app = userApps()[idx - flockEntries];
+      feature_active = true;
+      feature_exit_requested = false;
+      setTouchButtonInputEnabled(true);
+      app.setup();
+      while (feature_active && !feature_exit_requested) {
+        app.loop();
+        if (featureExitButtonPressed()) break;
+      }
+      app.exitFn();
     }
-    flock_menu::exit();
-    delay(400);   // let the exit tap expire so the tile cannot relaunch
-    setTouchButtonInputEnabled(false);
-    setTouchNavLabels(nullptr, nullptr, nullptr, nullptr, nullptr);
-    resetTouchNavHeldState();
-    feature_active = false;
-    feature_exit_requested = false;
-    is_main_menu = false;
-    displayMenu();
-    delay(200);
+    delay(400);   // drain the exit tap so the list does not relaunch
+  };
+
+  int cursor = 0;
+  bool redraw = true;
+  for (;;) {
+    if (redraw) {
+      redraw = false;
+      setTouchButtonInputEnabled(true);
+      setTouchNavLabels(nullptr, nullptr, "Exit", nullptr, nullptr);
+      featureClearContent(TFT_BLACK);
+      drawStatusBar(readBatteryVoltage(), true);
+      tft.setTextDatum(ML_DATUM);
+      tft.setTextColor(UI_ICON, TFT_BLACK);
+      tft.drawString("// APPS", 6, 28, 2);
+      tft.drawFastHLine(0, 38, tft.width(), UI_LINE);
+      tft.setTextDatum(TL_DATUM);
+      for (int i = 0; i < listCount; i++) {
+        const int y = 50 + i * 30;
+        const bool sel = (i == cursor);
+        tft.fillRect(6, y, tft.width() - 12, 26, sel ? UI_LABLE : TFT_BLACK);
+        tft.drawRect(6, y, tft.width() - 12, 26, sel ? UI_ICON : UI_LINE);
+        tft.setTextColor(sel ? UI_ICON : UI_TEXT, TFT_BLACK);
+        tft.drawString(String(i == 0 ? "> " : "  ") +
+                       (i == 0 ? "Flock Scanner" : userApps()[i - 1].name),
+                       12, y + 8, 2);
+      }
+      tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+      tft.drawString("tap a row or SELECT to launch", 8, 50 + listCount * 30 + 6, 1);
+      setupTouchscreen();
+      redrawTouchButtonBar();
+    }
+
+    // Exit (center) leaves the launcher back to the home menu.
+    if (featureExitButtonPressed()) {
+      delay(300);
+      break;
+    }
+    if (isButtonPressed(BTN_UP) || isTouchNavButtonPressedEdge(BTN_UP)) {
+      delay(150);
+      cursor = (cursor + listCount - 1) % listCount;
+      redraw = true;
+      continue;
+    }
+    if (isButtonPressed(BTN_DOWN) || isTouchNavButtonPressedEdge(BTN_DOWN)) {
+      delay(150);
+      cursor = (cursor + 1) % listCount;
+      redraw = true;
+      continue;
+    }
+    if (isButtonPressed(BTN_SELECT)) {
+      delay(200);
+      launchItem(cursor);
+      feature_active = false;
+      feature_exit_requested = false;
+      redraw = true;
+      continue;
+    }
+    int tx, ty;
+    if (readTouchXY(tx, ty)) {
+      delay(30);
+      for (int i = 0; i < listCount; i++) {
+        const int y = 50 + i * 30;
+        if (ty >= y && ty <= y + 26) {
+          launchItem(i);
+          feature_active = false;
+          feature_exit_requested = false;
+          redraw = true;
+          break;
+        }
+      }
+      // swallow the tap
+      while (readTouchXYDismiss(tx, ty)) delay(10);
+      delay(150);
+    }
+    delay(15);
+  }
+
+  setTouchButtonInputEnabled(false);
+  feature_active = false;
+  feature_exit_requested = false;
+  is_main_menu = false;
+  displayMenu();
+  delay(200);
 }
 
 void setup() {
