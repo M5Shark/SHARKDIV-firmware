@@ -677,6 +677,12 @@ static void drawTouchNavBar() {
   tft.fillRect(0, barY, barW, barH, UI_FG);
   tft.drawFastHLine(0, barY, barW, UI_LINE);
 
+  // Mark the centre (primary) key with a 2 px accent cap on its top edge, so
+  // Home/Exit reads as the main action while the arrow keys stay quiet.
+  const auto& ctr = s_touchNavBtns[2];
+  tft.drawFastHLine(ctr.x, barY, ctr.w, UI_ICON);
+  tft.drawFastHLine(ctr.x, barY + 1, ctr.w, UI_ICON);
+
   for (int i = 0; i < 5; ++i) {
     const auto& b = s_touchNavBtns[i];
     if (i > 0) {

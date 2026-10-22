@@ -55,11 +55,16 @@ void drawSharkTile(int16_t x, int16_t y, int16_t w, int16_t h, bool selected) {
   tft.startWrite();
   tft.fillRect(x, y, w, h, UI.fg);
   if (selected) {
+    // Focused card: a 2 px accent frame, a solid leading accent rail and the
+    // ctOS corner ticks — one unmistakable focus mark that reads at arm's
+    // length instead of a single hairline.
     tft.drawRect(x, y, w, h, UI.icon);
-    // Accent rail on the leading edge + corner ticks: the ctOS focus mark.
+    tft.drawRect(x + 1, y + 1, w - 2, h - 2, UI.icon);
     tft.fillRect(x, y, 3, h, UI.icon);
     wdCornerTicks(x + 3, y, w - 3, h, 5, UI.accent);
   } else {
+    // Resting card: a quiet hairline frame so the focused tile is the only
+    // thing competing for the eye.
     tft.drawRect(x, y, w, h, UI.line);
   }
   tft.endWrite();
@@ -68,7 +73,14 @@ void drawSharkTile(int16_t x, int16_t y, int16_t w, int16_t h, bool selected) {
 // List rows (submenus): selected row gets a leading accent rail.
 void drawSharkRowRail(int16_t y, int16_t h, bool selected) {
   tft.startWrite();
-  tft.fillRect(0, y, 4, h, selected ? UI.accent : UI_BG);
+  if (selected) {
+    tft.fillRect(0, y, 4, h, UI.accent);          // bold rail on the focus row
+  } else {
+    // A faint 1 px gutter keeps every row on a shared left spine, so the list
+    // reads as one aligned column instead of floating items.
+    tft.fillRect(0, y, 4, h, UI_BG);
+    tft.drawFastVLine(0, y, h, UI.line);
+  }
   tft.endWrite();
 }
 
