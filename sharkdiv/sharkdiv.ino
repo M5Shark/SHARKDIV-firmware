@@ -5410,7 +5410,9 @@ void setup() {
 #if DIV_VM_BUILD
   loading(15, UI_ICON, 0, 0, 2, true);   // shortened boot animation under QEMU
 #else
-  loading(100, UI_ICON, 0, 0, 2, true);
+  // The old vendor logo screen is gone — the Skull Glitch reel in
+  // displayLogo() is the one and only boot animation.
+  tft.fillScreen(TFT_BLACK);
 #endif
 
   tft.fillScreen(TFT_BLACK);
