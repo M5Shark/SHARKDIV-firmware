@@ -28,6 +28,11 @@ namespace DemoApp {
   void appLoop();
   void exit();
 }
+namespace flock_menu {
+  void appSetup();
+  void appLoop();
+  void exit();
+}
 // === generated app declarations (app builder writes below this line) ===
 namespace SignalLoggerApp {
   void appSetup();
