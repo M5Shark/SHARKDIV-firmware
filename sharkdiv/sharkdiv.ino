@@ -560,7 +560,7 @@ static bool s_pcfButtonLastState[8] = {true, true, true, true, true, true, true,
 #endif
 static FeatureUI::Button s_touchNavBtns[5];
 static const char* s_touchNavLabels[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-static constexpr int16_t TOUCH_NAV_BAR_H = (FeatureUI::FOOTER_H * 4) / 5;  // 20% shorter than footer
+static constexpr int16_t TOUCH_NAV_BAR_H = 52;  // big, readable, thumb-friendly
 
 static int touchNavPinForIndex(int idx) {
   switch (idx) {
@@ -687,8 +687,14 @@ static void drawTouchNavBar() {
       tft.setTextDatum(MC_DATUM);
       const uint16_t txtColor = (i == 2) ? UI_ICON : UI_TEXT;
       tft.setTextColor(txtColor, UI_FG);
-      const String fit = fitTouchNavLabel(s_touchNavLabels[i], b.w - 8);
-      tft.drawString(fit, b.x + b.w / 2, b.y + b.h / 2, 1);
+      const String fit = fitTouchNavLabel(s_touchNavLabels[i], b.w - 10);
+      // Size 2 when it fits — labels readable at arm's length; the centre
+      // slot (Exit/Home) always draws bold.
+      if (i == 2 || tft.textWidth(fit, 2) <= b.w - 10) {
+        tft.drawString(fit, b.x + b.w / 2, b.y + b.h / 2, 2);
+      } else {
+        tft.drawString(fit, b.x + b.w / 2, b.y + b.h / 2, 1);
+      }
     } else {
       const int ix = b.x + (b.w - kIconSize) / 2;
       const int iy = b.y + (b.h - kIconSize) / 2;
@@ -1251,6 +1257,17 @@ void displayMenu() {
 
   setTouchButtonInputEnabled(false);
   applyThemeToPalette(settings().theme);
+
+  // Home gets a slim brand strip so it reads as the root screen.
+  tft.fillRect(0, 0, tft.width(), 22, TFT_BLACK);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(UI_ICON, TFT_BLACK);
+  tft.drawString("SHARKDIV", 8, 11, 2);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString(String("v") + ESP32DIV_VERSION + "  //", tft.width() - 8, 12, 1);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawFastHLine(0, 22, tft.width(), UI_LINE);
 
 const uint16_t icon_colors[NUM_MENU_ITEMS] = {
   UI_ICON,
@@ -5338,17 +5355,22 @@ static void runFlockTileApp() {
       tft.drawString("// APPS", 6, 28, 2);
       tft.drawFastHLine(0, 38, tft.width(), UI_LINE);
       tft.setTextDatum(TL_DATUM);
+      // Card grid: 2 columns of tiles like the home screen.
+      const int cols = 2;
+      const int cardW = (tft.width() - 24) / cols;
+      const int cardH = 52;
       for (int i = 0; i < listCount; i++) {
-        const int y = 48 + i * 26;
+        const int cx = 8 + (i % cols) * (cardW + 8);
+        const int cy = 48 + (i / cols) * (cardH + 8);
         const bool sel = (i == cursor);
-        tft.fillRect(6, y, tft.width() - 12, 24, sel ? UI_LABLE : TFT_BLACK);
-        tft.drawRect(6, y, tft.width() - 12, 24, sel ? UI_ICON : UI_LINE);
-        tft.setTextColor(sel ? UI_ICON : UI_TEXT, TFT_BLACK);
-        tft.drawString(String(i == cursor ? "> " : "  ") + kFlockTools[i].name,
-                       12, y + 8, 2);
+        drawSharkTile(cx, cy, cardW, cardH, sel);
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextColor(sel ? UI_ICON : UI_TEXT, UI_FG);
+        tft.drawString(kFlockTools[i].name, cx + cardW / 2 + 3, cy + cardH / 2, 2);
+        tft.setTextDatum(TL_DATUM);
       }
       tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-      tft.drawString("tap a row or SELECT to launch", 8, 48 + listCount * 26 + 6, 1);
+      tft.drawString("tap a card - Home to exit", 8, tft.height() - 66, 1);
       setupTouchscreen();
       redrawTouchButtonBar();
     }
@@ -5389,9 +5411,13 @@ static void runFlockTileApp() {
         delay(300);
         break;
       }
+      const int cols2 = 2;
+      const int cardW2 = (tft.width() - 24) / cols2;
+      const int cardH2 = 52;
       for (int i = 0; i < listCount; i++) {
-        const int y = 48 + i * 26;
-        if (ty >= y && ty <= y + 24) {
+        const int cx = 8 + (i % cols2) * (cardW2 + 8);
+        const int cy = 48 + (i / cols2) * (cardH2 + 8);
+        if (tx >= cx && tx <= cx + cardW2 && ty >= cy && ty <= cy + cardH2) {
           launchItem(i);
           feature_active = true;
           feature_exit_requested = false;
