@@ -19,6 +19,7 @@
 #include "SharkTools.h"
 #include "SharkGamesDiv.h"
 #include "UserApps.h"
+#include "flock_menu.h"
 #include "SharkExtra.h"
 #include "ducky.h"
 #include "icon.h"
@@ -56,7 +57,7 @@ const char *menu_items[NUM_MENU_ITEMS] = {
     "Bluetooth",
     "SubGHz",
     "Tools",
-    "About"};
+    "Flock"};
 
 const unsigned char *bitmap_icons[NUM_MENU_ITEMS] = {
     bitmap_icon_wifi,
@@ -66,7 +67,7 @@ const unsigned char *bitmap_icons[NUM_MENU_ITEMS] = {
     bitmap_icon_spoofer,
     bitmap_icon_analyzer,
     bitmap_icon_stat,
-    bitmap_icon_question};
+    bitmap_icon_analyzer};
 
 int current_menu_index = 0;
 bool is_main_menu = false;
@@ -5173,7 +5174,27 @@ void handleButtons() {
             if (current_menu_index == 3) {
                 handleSettingsSubmenuButtons();
             } else if (current_menu_index == 7) {
-                handleAboutPage();
+                // Flock Scanner tile: launch the passive detector app.
+                feature_active = true;
+                feature_exit_requested = false;
+                setTouchButtonInputEnabled(true);
+                flock_menu::appSetup();
+                while (feature_active && !feature_exit_requested) {
+                    flock_menu::appLoop();
+                    if (featureExitButtonPressed()) break;
+                }
+                flock_menu::exit();
+                // Let the exit tap's latch expire so it cannot relaunch the
+                // app from the tile the moment the menu redraws.
+                delay(400);
+                setTouchButtonInputEnabled(false);
+                setTouchNavLabels(nullptr, nullptr, nullptr, nullptr, nullptr);
+                resetTouchNavHeldState();
+                feature_active = false;
+                feature_exit_requested = false;
+                is_main_menu = false;
+                displayMenu();
+                delay(200);
             } else {
                 updateActiveSubmenu();
 

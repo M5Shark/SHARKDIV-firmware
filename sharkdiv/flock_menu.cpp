@@ -356,15 +356,19 @@ static void loadOuis() {
 }
 
 void appSetup() {
+  Serial.println("[flock] setup: chrome");
   pauseBackgroundRadioTasks();
   chrome();
   loadSettings();
+  Serial.println("[flock] setup: radios");
   flock_wifi::begin();
   flock_ble::begin();
   flock_sensors::begin();
   flock_gps::begin();
+  Serial.println("[flock] setup: sd");
   flock_log::begin();
   loadOuis();
+  Serial.println("[flock] setup: done");
   s_phase = P_WIFI;
   s_phaseStart = millis();
   s_lastSensMs = 0;
@@ -413,6 +417,13 @@ void appLoop() {
   // engine
   if (s_settings[2]) flock_gps::poll();
   runPhase();
+  static uint32_t s_hb = 0;
+  if (millis() - s_hb > 5000) {
+    s_hb = millis();
+    Serial.printf("[flock] tick phase=%d score=%d wifiHits=%d ble=%d nrf=%d lte=%d\n",
+                  (int)s_phase, s_lastScore, flock_wifi::hitCount(),
+                  flock_ble::matches(), s_nrfAct, s_lteStr);
+  }
 
   // refresh
   if (millis() - s_lastPaint > 600) {
