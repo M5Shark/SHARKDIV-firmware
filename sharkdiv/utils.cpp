@@ -1278,8 +1278,8 @@ void loading(int frameDelay, uint16_t color, int16_t x, int16_t y, int repeats, 
 void displayLogo(uint16_t color, int displayTime) {
   UNUSED(color);
 
-  // Brief, static SHARKDIV identity screen.
-  playSharkBoot();
+  // Honor the caller's visible hold instead of silently using a 150 ms label.
+  playSharkBoot(displayTime > 0 ? (uint32_t)displayTime : 0);
 
   // CiferTech credits stay on the serial console (upstream attribution).
   Serial.println("==================================");
@@ -1292,7 +1292,6 @@ void displayLogo(uint16_t color, int displayTime) {
   Serial.print("Website:      "); serialPrintObf(OBF_WB, sizeof(OBF_WB), true);
   Serial.println("==================================");
 
-  UNUSED(displayTime);
 }
 
 namespace Terminal {

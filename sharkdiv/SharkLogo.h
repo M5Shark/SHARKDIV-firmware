@@ -2,7 +2,7 @@
 
 // M5 SHARK shark-head logo, 1-bit MSB-first (Adafruit drawBitmap layout).
 // Generated from assets/branding/M5SHARK-logo-white.png (the user's supplied
-// white logo art). Drawn in the active theme color during the second splash.
+// white logo art). Drawn in the active theme color on the startup splash.
 
 #include <Arduino.h>
 
