@@ -1,9 +1,11 @@
-// detectors.cpp — see header. Signature-driven detectors share one engine:
-// passive BLE observer scan + WiFi async scan (+ OUI from BSSIDs), hits
-// scored by matched evidence, RSSI meter + locate view per target.
+// detectors.cpp — bounded, passive BLE/Wi-Fi broadcast candidate receivers.
+// Match evidence and radio activity are shown separately from device identity.
 #include "detectors.h"
 #include "RemoteIdParser.h"
 #include "BleHostOperation.h"
+#include "DetectorSupport.h"
+#include "FlockSignatures.h"
+#include "PassiveWifiLifecycle.h"
 #include <esp_netif.h>
 #include "icon.h"
 #include "config.h"
@@ -69,7 +71,7 @@ static const Sig kSigs[] = {
   { "Pwnagotchi", "wifi agent",
     {}, {}, {}, {"pwnagotchi", "Pwnagotchi", nullptr}, {} },
   { "WiFi Cameras", "camera",
-    {}, {}, {}, {}, {} },          // OUI list from SD (camera-ouis.txt)
+    {}, {}, {}, {}, {} },          // Built-in Flock + optional custom camera OUIs.
   { "LE Gear", "law enforcement",
     {}, {}, {}, {}, {} },          // OUI list from SD (gear-ouis.txt)
   { "Drone RemoteID", "drone",
@@ -79,293 +81,275 @@ static const Sig kSigs[] = {
 };
 static constexpr int kSigCount = sizeof(kSigs) / sizeof(kSigs[0]);
 
-// SD-extendable OUI lists
-static char s_camOuis[24][10];
-static int s_camOuiCount = 0;
-static char s_gearOuis[24][10];
-static int s_gearOuiCount = 0;
-
-static void loadOuiFile(const char* path, char list[][10], int* n, int max) {
-  *n = 0;
-  File f = SD.open(path);
-  if (!f) return;
-  while (f.available() && *n < max) {
-    String l = f.readStringUntil('\n');
-    l.trim();
-    l.toLowerCase();
-    if (l.length() == 8) {
-      strncpy(list[*n], l.c_str(), 8);
-      list[*n][8] = 0;
-      (*n)++;
-    }
+// Optional custom prefixes supplement the built-in Flock camera indicators.
+static DetectorSupport::OuiList s_camOuis, s_gearOuis;
+static void loadOuiFile(const char* path, DetectorSupport::OuiList& list) {
+  list = DetectorSupport::OuiList{};
+  File file = SD.open(path);
+  if (!file) return;
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    const int comment = line.indexOf('#');
+    if (comment >= 0) line.remove(comment);
+    line.trim();
+    if (line.length()) list.add(line.c_str());
   }
-  f.close();
+  file.close();
 }
 
-// ── hit list ────────────────────────────────────────────────────────
-struct Hit {
-  char desc[40];      // name or MAC
-  char mac[18];
-  int8_t rssi;
-  uint8_t confidence; // 1 possible 2 likely 3 confirmed
-  uint32_t lastMs;
-  uint32_t firstMs;
-  uint16_t seen;      // for Device Scout persistence
-};
-static constexpr int kMaxHits = 14;
-static Hit s_hits[kMaxHits];
-static int s_hitCount = 0;
-
-static void upsert(const char* desc, const char* mac, int8_t rssi, uint8_t conf) {
-  for (int i = 0; i < s_hitCount; i++) {
-    if (!strcmp(s_hits[i].mac, mac)) {
-      s_hits[i].rssi = rssi;
-      s_hits[i].lastMs = millis();
-      s_hits[i].seen++;
-      if (conf > s_hits[i].confidence) s_hits[i].confidence = conf;
-      return;
-    }
-  }
-  if (s_hitCount >= kMaxHits) return;
-  Hit& h = s_hits[s_hitCount++];
-  strncpy(h.desc, desc, 39); h.desc[39] = 0;
-  strncpy(h.mac, mac, 17); h.mac[17] = 0;
-  h.rssi = rssi;
-  h.confidence = conf;
-  h.lastMs = h.firstMs = millis();
-  h.seen = 1;
-}
-
-static void decayHits() {
-  const uint32_t now = millis();
-  for (int i = 0; i < s_hitCount; ) {
-    if (now - s_hits[i].lastMs > 30000) {
-      memmove(&s_hits[i], &s_hits[i + 1], sizeof(Hit) * (s_hitCount - i - 1));
-      s_hitCount--;
-    } else {
-      i++;
-    }
-  }
-}
-
-// ── BLE passive scan ────────────────────────────────────────────────
+using Hit = DetectorSupport::Hit;
+static constexpr int kMaxHits = DetectorSupport::Table::capacity;
+static DetectorSupport::Table s_table;
+static portMUX_TYPE s_detectorLock = portMUX_INITIALIZER_UNLOCKED;
 static const Sig* s_active = nullptr;
+static bool s_inspectAll = false;
+static uint32_t s_wifiFrames = 0, s_bleAdvertisements = 0;
 
-static bool bleMatch(const Sig& s, NimBLEAdvertisedDevice* d, const char** outName) {
-  if (d->haveName()) {
-    const std::string n = d->getName();
-    for (int i = 0; i < 4 && s.bleNames[i]; i++) {
-      if (!s.bleNames[i][0]) continue;
-      if (n.find(s.bleNames[i]) != std::string::npos) {
-        *outName = s.bleNames[i];
-        return true;
-      }
+static bool cameraMode(const Sig& s) { return !strcmp(s.detName, "WiFi Cameras"); }
+static bool gearMode(const Sig& s) { return !strcmp(s.detName, "LE Gear"); }
+
+static void upsert(const Sig* expected, const char* desc, const char* mac,
+                   int8_t rssi, uint8_t channel, uint8_t evidence) {
+  portENTER_CRITICAL(&s_detectorLock);
+  if (s_active == expected)
+    s_table.observe(desc, mac, rssi, channel, evidence, millis());
+  portEXIT_CRITICAL(&s_detectorLock);
+}
+static int detectorSnapshot(Hit* out, uint32_t* wifiFrames = nullptr,
+                            uint32_t* bleAdvertisements = nullptr) {
+  portENTER_CRITICAL(&s_detectorLock);
+  const int count = s_table.snapshot(out, kMaxHits, millis());
+  if (wifiFrames) *wifiFrames = s_wifiFrames;
+  if (bleAdvertisements) *bleAdvertisements = s_bleAdvertisements;
+  portEXIT_CRITICAL(&s_detectorLock);
+  return count;
+}
+
+static uint8_t bleMatch(const Sig& s, BLEAdvertisedDevice* device) {
+  if (cameraMode(s))
+    return FlockSignatures::bleAdvertisementEvidence(device->getPayload(),
+                                                    device->getPayloadLength());
+  uint8_t evidence = 0;
+  if (device->haveName()) {
+    const std::string name = device->getName();
+    for (int i = 0; i < 4 && s.bleNames[i]; ++i)
+      if (*s.bleNames[i] && name.find(s.bleNames[i]) != std::string::npos)
+        evidence |= DetectorSupport::Name;
+  }
+  for (int i = 0; i < 4 && s.bleUuid16[i]; ++i) {
+    const NimBLEUUID uuid(s.bleUuid16[i]);
+    if (device->isAdvertisingService(uuid)) evidence |= DetectorSupport::Service;
+    for (uint8_t n = 0; n < device->getServiceDataCount(); ++n)
+      if (device->getServiceDataUUID(n) == uuid) evidence |= DetectorSupport::Service;
+  }
+  for (uint8_t n = 0; n < device->getManufacturerDataCount(); ++n) {
+    const std::string data = device->getManufacturerData(n);
+    if (data.size() < 2) continue;
+    const uint16_t company = static_cast<uint8_t>(data[0]) |
+                             (static_cast<uint8_t>(data[1]) << 8);
+    if (!strcmp(s.detName, "iBeacon")) {
+      // Apple's company ID alone matches many devices, not just iBeacons.
+      if (data.size() >= 25 && company == 0x004c &&
+          data[2] == 0x02 && data[3] == 0x15) evidence |= DetectorSupport::Service;
+    } else {
+      for (int i = 0; i < 2 && s.bleCompany[i]; ++i)
+        if (company == s.bleCompany[i]) evidence |= DetectorSupport::Vendor;
     }
   }
-  if (d->haveServiceUUID()) {
-    for (int i = 0; i < 4 && s.bleUuid16[i]; i++) {
-      if (d->getServiceUUID() == NimBLEUUID(s.bleUuid16[i]) ||
-          (d->haveServiceData() &&
-           d->getServiceDataUUID() == NimBLEUUID(s.bleUuid16[i]))) {
-        *outName = "service";
-        return true;
-      }
-    }
-  }
-  if (d->haveManufacturerData()) {
-    const std::string md = d->getManufacturerData();
-    if (md.size() >= 2) {
-      const uint16_t co = (uint8_t)md[0] | ((uint8_t)md[1] << 8);
-      for (int i = 0; i < 2 && s.bleCompany[i]; i++) {
-        if (co == s.bleCompany[i]) {
-          *outName = "manufacturer";
-          return true;
-        }
-      }
-      // iBeacon: Apple company + adv type byte 0x02 len 0x15
-      if (co == 0x004C && md.size() >= 4 && md[2] == 0x02 && md[3] == 0x15 &&
-          !strcmp(s.detName, "iBeacon")) {
-        *outName = "iBeacon";
-        return true;
-      }
-    }
-  }
-  return false;
+  return evidence;
 }
 
 class DetCb : public BLEAdvertisedDeviceCallbacks {
-  void onResult(BLEAdvertisedDevice* d) override {
-    if (!s_active || !d) return;
-    const char* why = nullptr;
-    if (bleMatch(*s_active, d, &why)) {
-      const std::string nm = d->haveName() ? d->getName() : why;
-      upsert(nm.c_str(), d->getAddress().toString().c_str(),
-             (int8_t)d->getRSSI(), 2);
-    } else if (!strcmp(s_active->detName, "Device Scout")) {
-      // scout: every BLE device, ranked by persistence
-      const std::string nm = d->haveName() ? d->getName() : "";
-      char label[40];
-      snprintf(label, sizeof(label), "%s", nm.empty() ? "(unnamed)" : nm.c_str());
-      upsert(label, d->getAddress().toString().c_str(), (int8_t)d->getRSSI(), 1);
-    }
+  void onResult(BLEAdvertisedDevice* device) override {
+    if (!device) return;
+    portENTER_CRITICAL(&s_detectorLock);
+    const Sig* active = s_active;
+    const bool inspect = s_inspectAll;
+    if (active && s_bleAdvertisements != UINT32_MAX) ++s_bleAdvertisements;
+    portEXIT_CRITICAL(&s_detectorLock);
+    if (!active) return;
+    uint8_t evidence = bleMatch(*active, device);
+    if (!evidence && (inspect || !strcmp(active->detName, "Device Scout")))
+      evidence = DetectorSupport::Advertisement;
+    if (!evidence) return;
+    std::string name = device->haveName() ? device->getName() :
+                       cameraMode(*active) ? "Flock BLE candidate" : "Unnamed BLE";
+    // Advertised names are untrusted display text.
+    for (char& c : name) if (static_cast<uint8_t>(c) < 32 || static_cast<uint8_t>(c) > 126) c = '?';
+    upsert(active, name.c_str(), device->getAddress().toString().c_str(),
+           device->getRSSI(), 0, evidence);
   }
 };
 static DetCb s_cb;
 
-static bool ouiInList(const char* mac, const char list[][10], int n) {
-  char buf[9];
-  memcpy(buf, mac, 8);
-  buf[8] = 0;
-  for (int i = 0; i < n; i++) {
-    if (!strcmp(buf, list[i])) return true;
+static void detectorWifiCallback(void* buffer, wifi_promiscuous_pkt_type_t type) {
+  if (!buffer || type != WIFI_PKT_MGMT) return;
+  const wifi_promiscuous_pkt_t* packet = static_cast<const wifi_promiscuous_pkt_t*>(buffer);
+  if (packet->rx_ctrl.sig_len < 28) return;
+  DetectorSupport::WifiAdvertisement advertisement;
+  if (!DetectorSupport::parseWifiAdvertisement(packet->payload,
+        packet->rx_ctrl.sig_len - 4, advertisement)) return;
+  portENTER_CRITICAL(&s_detectorLock);
+  const Sig* active = s_active;
+  if (active && s_wifiFrames != UINT32_MAX) ++s_wifiFrames;
+  portEXIT_CRITICAL(&s_detectorLock);
+  if (!active) return;
+  uint8_t evidence = 0;
+  if (cameraMode(*active)) {
+    const auto probe = FlockSignatures::probeFrame(packet->payload,
+                                                   packet->rx_ctrl.sig_len, true);
+    if (probe.valid && probe.fingerprint) evidence |= DetectorSupport::Fingerprint;
+    if (FlockSignatures::wifiOui(advertisement.mac) || s_camOuis.matches(advertisement.mac))
+      evidence |= DetectorSupport::Vendor;
+    if (FlockSignatures::ssid(advertisement.ssid)) evidence |= DetectorSupport::Name;
+    if ((evidence & DetectorSupport::Vendor) && advertisement.wildcard)
+      evidence |= DetectorSupport::Probe;
+  } else if (gearMode(*active)) {
+    if (s_gearOuis.matches(advertisement.mac)) evidence |= DetectorSupport::Vendor;
+  } else {
+    for (int i = 0; i < 3 && active->wifiSsids[i]; ++i)
+      if (strstr(advertisement.ssid, active->wifiSsids[i])) evidence |= DetectorSupport::Name;
   }
-  return false;
+  if (!evidence) return;
+  char mac[18];
+  snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+           advertisement.mac[0], advertisement.mac[1], advertisement.mac[2],
+           advertisement.mac[3], advertisement.mac[4], advertisement.mac[5]);
+  const char* label = advertisement.ssid[0] ? advertisement.ssid :
+      advertisement.probe ? "Probe transmitter" : "Hidden network";
+  upsert(active, label, mac, packet->rx_ctrl.rssi, packet->rx_ctrl.channel, evidence);
 }
 
-static void wifiScan(const Sig& s) {
-  WiFi.mode(WIFI_MODE_STA);
-  WiFi.scanDelete();
-  const int n = WiFi.scanNetworks(false, false);
-  for (int i = 0; i < n; i++) {
-    const String ssid = WiFi.SSID(i);
-    const uint8_t* bssid = WiFi.BSSID(i);
-    if (!bssid) continue;
-    char mac[18];
-    snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-             bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
-    bool bySsid = false, byOui = false;
-    for (int k = 0; k < 3 && s.wifiSsids[k]; k++) {
-      if (ssid.indexOf(s.wifiSsids[k]) >= 0) bySsid = true;
-    }
-    if (!strcmp(s.detName, "WiFi Cameras")) {
-      byOui = ouiInList(mac, s_camOuis, s_camOuiCount);
-    } else if (!strcmp(s.detName, "LE Gear")) {
-      byOui = ouiInList(mac, s_gearOuis, s_gearOuiCount);
-    } else {
-      for (int k = 0; k < 4 && s.wifiOuis[k]; k++) {
-        if (!strncmp(mac, s.wifiOuis[k], 8)) byOui = true;
-      }
-    }
-    if (bySsid || byOui) {
-      upsert(ssid.c_str(), mac, WiFi.RSSI(i), bySsid ? 3 : 2);
-    }
+struct DetectorWifiDriver {
+  bool arduinoStation() { return WiFi.mode(WIFI_MODE_STA); }
+  void disconnectStation() { WiFi.disconnect(false, false); }
+  void cancelScan() { esp_wifi_scan_stop(); WiFi.scanDelete(); }
+  void disableMonitor() { esp_wifi_set_promiscuous(false); }
+  bool nullMode() { return esp_wifi_set_mode(WIFI_MODE_NULL) == ESP_OK; }
+  bool startDriver() { return esp_wifi_start() == ESP_OK; }
+  void detachReceiver() { esp_wifi_set_promiscuous_rx_cb(nullptr); }
+  bool initialized() {
+    wifi_mode_t mode;
+    return esp_wifi_get_mode(&mode) != ESP_ERR_WIFI_NOT_INIT;
   }
-  WiFi.scanDelete();
+  bool stationMode() { return esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK; }
+  bool arduinoOff() { return WiFi.mode(WIFI_OFF); }
+};
+static bool stopDetectorWifi() {
+  DetectorWifiDriver radio;
+  return PassiveWifiLifecycle::stop(radio);
+}
+static bool startDetectorWifi() {
+  DetectorWifiDriver radio;
+  if (!PassiveWifiLifecycle::start(radio)) return false;
+  wifi_promiscuous_filter_t filter = {};
+  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
+  return esp_wifi_set_promiscuous_filter(&filter) == ESP_OK &&
+         esp_wifi_set_promiscuous_rx_cb(&detectorWifiCallback) == ESP_OK &&
+         esp_wifi_set_promiscuous(true) == ESP_OK &&
+         esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE) == ESP_OK;
 }
 
-// ── per-detector screen ─────────────────────────────────────────────
+// ── detector screens ───────────────────────────────────────────────
 static void chrome(const char* title, const char* chip) {
+  (void)chip;
   setTouchButtonInputEnabled(true);
-  setTouchNavLabels("Prev", "Rescan", "Home", "Locate", "Next");
+  setTouchNavLabels("Prev", "Clear", "Exit", "View", "Next");
   featureClearContent(TFT_BLACK);
   drawStatusBar(readBatteryVoltage(), true);
-
-  // header: accent brand block + title + category chip, ctOS style
-  tft.fillRect(0, 22, tft.width(), 22, TFT_BLACK);
-  const int16_t badgeW = tft.textWidth("SHARKDIV", 1) + 10;
-  tft.fillRect(0, 22, badgeW, 20, UI_ICON);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_BLACK, UI_ICON);
-  tft.drawString("SHARKDIV", badgeW / 2, 32, 1);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(UI_ICON, TFT_BLACK);
-  tft.drawString(String("// ") + title, badgeW + 6, 32, 2);
-  if (chip) {
-    const int16_t cw = tft.textWidth(chip, 1) + 10;
-    tft.drawRect(tft.width() - cw - 6, 25, cw, 15, UI_LABLE);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(UI_LABLE, TFT_BLACK);
-    tft.drawString(chip, tft.width() - cw / 2 - 6, 32, 1);
-  }
+  tft.fillRect(0, 22, tft.width(), 23, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  tft.drawFastHLine(0, 44, tft.width(), UI_LINE);
+  tft.setTextColor(UI_TEXT, TFT_BLACK);
+  tft.drawString(title, 8, 26, 2);
+  tft.drawFastHLine(8, 44, tft.width() - 16, UI_LINE);
   setupTouchscreen();
   redrawTouchButtonBar();
 }
 
-static const char* confName(uint8_t c) {
-  return c >= 3 ? "CONFIRMED" : (c == 2 ? "LIKELY" : "POSSIBLE");
-}
-static uint16_t confColor(uint8_t c) {
-  return c >= 3 ? 0x07E0 : (c == 2 ? UI_WARN : UI_DIM_TEXT);
-}
-
-static void paintHits(int cursor, bool locateMode) {
-  const int16_t bottom = touchNavContentBottomY() > 0 ? touchNavContentBottomY()
-                                                      : tft.height() - 60;
+static void paintHits(int& cursor, bool details, const Sig& signature,
+                      bool wifiWanted, bool bleWanted, bool wifiOk, bool bleOk,
+                      uint8_t channel, bool inspector) {
+  Hit hits[kMaxHits];
+  uint32_t wifiFrames = 0, bleAdvertisements = 0;
+  const int count = detectorSnapshot(hits, &wifiFrames, &bleAdvertisements);
+  if (cursor >= count) cursor = 0;
+  const int bottom = touchNavContentBottomY() > 0 ? touchNavContentBottomY()
+                                                 : tft.height() - 60;
   tft.fillRect(0, 46, tft.width(), bottom - 46, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-
-  if (s_hitCount == 0) {
-    // live pulse: the screen breathes while listening
-    const bool on = (millis() / 400) & 1;
-    const int16_t cx = tft.width() / 2;
-    tft.drawCircle(cx, 110, 5, on ? 0x07E0 : UI_LINE);
-    tft.drawCircle(cx, 110, 11, UI_LINE);
-    tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString("sweeping the airwaves...", cx, 140, 2);
-    tft.setTextDatum(TL_DATUM);
-    return;
-  }
-
-  if (locateMode && cursor < s_hitCount) {
-    // radial locate meter — big dBm + arc that fills with proximity
-    const Hit& h = s_hits[cursor];
-    const int rssi = h.rssi;
-    const int v = constrain((rssi + 100) * 100 / 60, 0, 100);
-    const int16_t cx = tft.width() / 2, cy = 118, rad = 62;
-    // arc segments: 12 segments, lit count = v
-    for (int seg = 0; seg < 12; seg++) {
-      const float a = -PI / 2 + seg * (PI / 12.0f) * 1.55f - 0.75f;
-      const int16_t x0 = cx + cosf(a) * (rad - 7), y0 = cy + sinf(a) * (rad - 7);
-      const int16_t x1 = cx + cosf(a) * rad,       y1 = cy + sinf(a) * rad;
-      const bool lit = (seg * 100 / 12) < v;
-      tft.drawLine(x0, y0, x1, y1, lit ? 0x07E0 : UI_LINE);
-      tft.drawLine(x0 + 1, y0, x1 + 1, y1, lit ? 0x07E0 : UI_LINE);
-    }
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(0x07E0, TFT_BLACK);
-    tft.drawString(String(rssi), cx, cy - 4, 6);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  char text[80];
+  snprintf(text, sizeof(text), "WiFi %s  BLE %s  CH %02u",
+      !wifiWanted ? "--" : wifiOk ? "ON" : "ERR",
+      !bleWanted ? "--" : bleOk ? "ON" : "ERR", channel);
+  tft.drawString(text, 8, 50, 1);
+  snprintf(text, sizeof(text), "RX frames %lu  BLE ads %lu",
+      static_cast<unsigned long>(wifiFrames), static_cast<unsigned long>(bleAdvertisements));
+  tft.drawString(text, 8, 64, 1);
+  snprintf(text, sizeof(text), "%u %s / %s", count, inspector ? "devices" : "candidates",
+      details ? "DETAIL" : "LIST");
+  tft.setTextColor(UI_ICON, TFT_BLACK);
+  tft.drawString(text, 8, 78, 1);
+  if (!count) {
     tft.setTextColor(UI_TEXT, TFT_BLACK);
-    tft.drawString("dBm", cx, cy + 24, 2);
+    tft.drawString(gearMode(signature) && !s_gearOuis.count ? "No filter configured" :
+                   "No matches received", 8, 106, 2);
     tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-    tft.drawString(h.desc, cx, cy + 48, 1);
-    tft.drawString("walk toward the peak", cx, cy + 62, 1);
-    tft.setTextDatum(TL_DATUM);
-    return;
-  }
-
-  // hit rows: name + mac, inline RSSI bar, confidence pill
-  int y = 48;
-  for (int i = 0; i < s_hitCount && y + 30 < bottom; i++) {
-    const bool sel = (i == cursor);
-    if (sel) {
-      tft.fillRect(4, y, tft.width() - 8, 28, UI_LABLE);
-      tft.fillRect(4, y, 3, 28, UI_ICON);   // accent rail on selection
+    if (gearMode(signature) && !s_gearOuis.count) {
+      tft.drawString("No custom prefixes loaded.", 8, 135, 1);
+      tft.drawString("Add xx:xx:xx lines to SD:", 8, 151, 1);
+      tft.drawString("/flock/gear-ouis.txt", 8, 167, 1);
+    } else if (cameraMode(signature)) {
+      snprintf(text, sizeof(text), "Flock indicators + %u custom OUIs", s_camOuis.count);
+      tft.drawString(text, 8, 135, 1);
+      tft.drawString("WiFi probe + beacon / BLE ads", 8, 151, 1);
+      tft.drawString("Built-in profiles need no SD card.", 8, 167, 1);
+      tft.drawString("No result does not rule out cameras.", 8, 189, 1);
+    } else {
+      tft.drawString("Listening for matching broadcasts.", 8, 135, 1);
+      tft.drawString("RX counters show radio activity.", 8, 155, 1);
     }
-    tft.drawRect(4, y, tft.width() - 8, 28, sel ? UI_ICON : UI_LINE);
-    tft.setTextColor(sel ? UI_ICON : UI_TEXT, TFT_BLACK);
-    tft.drawString(s_hits[i].desc, 10, y + 3, 2);
-    tft.setTextColor(UI_DIM_TEXT, sel ? UI_LABLE : TFT_BLACK);
-    tft.drawString(s_hits[i].mac, 10, y + 19, 1);
-    // inline RSSI bar
-    const int rv = constrain((s_hits[i].rssi + 100) * 100 / 60, 0, 100);
-    tft.drawRect(150, y + 6, 56, 8, UI_LINE);
-    tft.fillRect(152, y + 8, 52 * rv / 100, 4,
-                 s_hits[i].rssi > -60 ? 0x07E0 : (s_hits[i].rssi > -80 ? UI_WARN : UI_DIM_TEXT));
-    // confidence pill
-    const char* cn = confName(s_hits[i].confidence);
-    const int16_t pw = tft.textWidth(cn, 1) + 8;
-    tft.fillRoundRect(tft.width() - pw - 8, y + 6, pw, 12, 3,
-                      s_hits[i].confidence >= 3 ? 0x07E0 :
-                      (s_hits[i].confidence == 2 ? UI_WARN : UI_LABLE));
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_BLACK, TFT_BLACK);
-    tft.drawString(cn, tft.width() - pw / 2 - 8, y + 12, 1);
-    tft.setTextDatum(TL_DATUM);
-    y += 30;
+  } else if (details) {
+    const Hit& hit = hits[cursor];
+    tft.setTextColor(UI_TEXT, TFT_BLACK);
+    snprintf(text, sizeof(text), "%u/%u %.30s", cursor + 1, count, hit.desc);
+    tft.drawString(text, 8, 103, 1);
+    tft.drawString(hit.mac, 8, 122, 1);
+    snprintf(text, sizeof(text), "%s  %d dBm  CH %u", hit.channel ? "WIFI" : "BLE", hit.rssi, hit.channel);
+    tft.drawString(text, 8, 141, 1);
+    snprintf(text, sizeof(text), "Match:%s%s%s%s%s%s",
+        hit.evidence & DetectorSupport::Name ? " name" : "",
+        hit.evidence & DetectorSupport::Vendor ? " vendor" : "",
+        hit.evidence & DetectorSupport::Service ? " service" : "",
+        hit.evidence & DetectorSupport::Probe ? " probe" : "",
+        hit.evidence & DetectorSupport::Advertisement ? " advert" : "",
+        hit.evidence & DetectorSupport::Fingerprint ? " fingerprint" : "");
+    if (strlen(text) > 36) {
+      char second[40];
+      snprintf(second, sizeof(second), "%s", text + 36);
+      text[36] = 0;
+      tft.drawString(second, 8, 176, 1);
+    }
+    tft.drawString(text, 8, 162, 1);
+    snprintf(text, sizeof(text), "Seen %u times / last %lus ago", hit.seen,
+        static_cast<unsigned long>((millis() - hit.lastMs) / 1000));
+    tft.drawString(text, 8, 192, 1);
+    tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+    tft.drawString("RSSI is signal, not distance.", 8, 209, 1);
+  } else {
+    for (int i = (cursor / 4) * 4; i < count && i < (cursor / 4 + 1) * 4; ++i) {
+      const int y = 100 + (i % 4) * 31;
+      tft.setTextColor(i == cursor ? UI_ICON : UI_TEXT, TFT_BLACK);
+      snprintf(text, sizeof(text), "%c %.32s", i == cursor ? '>' : ' ', hits[i].desc);
+      tft.drawString(text, 8, y, 1);
+      tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+      snprintf(text, sizeof(text), "  %s  %d dBm  %lus ago", hits[i].channel ? "WIFI" : "BLE", hits[i].rssi,
+          static_cast<unsigned long>((millis() - hits[i].lastMs) / 1000));
+      tft.drawString(text, 8, y + 13, 1);
+    }
   }
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("Indicators only / identity unverified", 8, bottom - 14, 1);
 }
 
 // Remote ID gets its own bounded table: arbitrary manufacturers and SSIDs
@@ -461,22 +445,8 @@ static void ridWifiCallback(void* buffer, wifi_promiscuous_pkt_type_t type) {
 }
 
 static bool ridStartWifi() {
-  wifi_mode_t previous;
-  const esp_err_t state = esp_wifi_get_mode(&previous);
-  if (state == ESP_ERR_WIFI_NOT_INIT) {
-    // WIFI_MODE_NULL supplies the monitor radio without an AP or station that
-    // could associate, beacon, or send probe requests.
-    esp_netif_init();
-    esp_event_loop_create_default();
-    wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
-    if (esp_wifi_init(&config) != ESP_OK) return false;
-  } else if (state != ESP_OK) return false;
-  esp_wifi_scan_stop();
-  esp_wifi_set_promiscuous(false);
-  esp_wifi_stop();
-  if (esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK ||
-      esp_wifi_set_mode(WIFI_MODE_NULL) != ESP_OK ||
-      esp_wifi_start() != ESP_OK) return false;
+  DetectorWifiDriver radio;
+  if (!PassiveWifiLifecycle::start(radio)) return false;
   wifi_promiscuous_filter_t filter = {};
   filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
   return esp_wifi_set_promiscuous_filter(&filter) == ESP_OK &&
@@ -592,7 +562,9 @@ static void ridPaint(int& cursor, bool details, bool wifiOk, bool bleOk,
 
 static void runRemoteId() {
   pauseBackgroundRadioTasks();
+  portENTER_CRITICAL(&s_detectorLock);
   s_active = nullptr;
+  portEXIT_CRITICAL(&s_detectorLock);
   portENTER_CRITICAL(&s_ridLock);
   s_ridCount = 0;
   s_ridReceiving = true;
@@ -675,228 +647,174 @@ static void runRemoteId() {
       Serial.println("[RemoteID] BLE stop failed; bounded scan retained, restart recommended");
     }
   }
-  esp_wifi_set_promiscuous(false);
-  esp_wifi_set_promiscuous_rx_cb(nullptr);
-  esp_wifi_stop();
+  if (!stopDetectorWifi()) Serial.println("[RemoteID] WiFi shutdown failed");
 }
 
-static void runDetector(int sigIdx) {
-  const Sig& s = kSigs[sigIdx];
-  if (!strcmp(s.detName, "Drone RemoteID")) { runRemoteId(); return; }
-  s_active = &s;
-  s_hitCount = 0;
-  chrome(s.detName, kSigChips[sigIdx]);
-
-  bool wifiEver = s.wifiSsids[0] || s.wifiOuis[0] ||
-                  !strcmp(s.detName, "WiFi Cameras") || !strcmp(s.detName, "LE Gear");
-
+static void runDetector(int sigIdx, bool inspector = false) {
+  const Sig& signature = kSigs[sigIdx];
+  if (!strcmp(signature.detName, "Drone RemoteID")) { runRemoteId(); return; }
   pauseBackgroundRadioTasks();
-
-  // BLE observer window (unless detector is WiFi-only)
-  const bool useBle = true;  // Existing signature detectors observe BLE.
-  if (useBle) {
-    ensureBleStackReady();
-    BLEScan* scan = BLEDevice::getScan();
-    scan->stop();
-    scan->setAdvertisedDeviceCallbacks(&s_cb, true);
-    scan->setActiveScan(false);
-    scan->setInterval(100);
-    scan->setWindow(100);
-    scan->setDuplicateFilter(true);
-  }
-
+  portENTER_CRITICAL(&s_detectorLock);
+  s_active = &signature;
+  s_inspectAll = inspector;
+  s_table.clear();
+  s_wifiFrames = s_bleAdvertisements = 0;
+  portEXIT_CRITICAL(&s_detectorLock);
+  chrome(inspector ? "BLE Inspector" : signature.detName, nullptr);
+  const bool wantWifi = cameraMode(signature) ||
+      (gearMode(signature) && s_gearOuis.count > 0) || signature.wifiSsids[0];
+  const bool wantBle = cameraMode(signature) || signature.bleNames[0] ||
+      signature.bleUuid16[0] || signature.bleCompany[0] || inspector ||
+      !strcmp(signature.detName, "Device Scout");
+  const bool wifiOk = wantWifi && startDetectorWifi();
+  struct BleStart { BLEScan* scan; bool configured; bool started; } ble = {nullptr, false, false};
+  const bool bleExecuted = wantBle && ensureBleStackReady() && runBleHostOperation([](void* context) {
+    BleStart& request = *static_cast<BleStart*>(context);
+    request.scan = BLEDevice::getScan();
+    if (!request.scan || !request.scan->stop()) return;
+    BLEDevice::getAdvertising()->stop();
+    request.scan->clearResults();
+    request.scan->setAdvertisedDeviceCallbacks(&s_cb, true);
+    request.scan->setActiveScan(false);
+    request.scan->setInterval(160);
+    request.scan->setWindow(80);
+    request.scan->setDuplicateFilter(false);
+    request.scan->setMaxResults(0);
+    request.configured = true;
+    request.started = request.scan->start(0, nullptr, false);
+  }, &ble);
+  const bool bleOk = bleExecuted && ble.started;
+  if ((wantWifi && !wifiOk) || (wantBle && !bleOk))
+    Serial.printf("[detectors] radio error: WiFi %d BLE %d\n", wifiOk, bleOk);
   int cursor = 0;
-  bool locate = false;
-  uint32_t lastScan = 0;
-  uint32_t lastPaint = 0;
-
-
-  for (;;) {
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
-      break;
+  bool details = false;
+  uint8_t channel = 6;
+  uint32_t lastHop = millis(), lastPaint = 0;
+  while (!feature_exit_requested) {
+    if (featureExitButtonPressed()) break;
+    if (isButtonPressedEdge(BTN_LEFT)) cursor = cursor > 0 ? cursor - 1 : 0;
+    else if (isButtonPressedEdge(BTN_RIGHT)) ++cursor;
+    else if (isButtonPressedEdge(BTN_UP)) details = !details;
+    else if (isButtonPressedEdge(BTN_DOWN)) {
+      portENTER_CRITICAL(&s_detectorLock);
+      s_table.clear();
+      s_wifiFrames = s_bleAdvertisements = 0;
+      portEXIT_CRITICAL(&s_detectorLock);
+      cursor = 0;
     }
     const uint32_t now = millis();
-
-    if (isTouchNavButtonPressedEdge(BTN_UP) || isButtonPressed(BTN_UP)) {
-      delay(150);
-      locate = !locate;
-    } else if (isTouchNavButtonPressedEdge(BTN_DOWN) || isButtonPressed(BTN_DOWN)) {
-      delay(150);
-      if (s_hitCount) cursor = (cursor + 1) % s_hitCount;
-    } else if (isTouchNavButtonPressedEdge(BTN_LEFT) || isButtonPressed(BTN_LEFT)) {
-      break;   // back to detector list
-    } else if (isTouchNavButtonPressedEdge(BTN_RIGHT) || isButtonPressed(BTN_RIGHT)) {
-      break;
+    if (wifiOk && now - lastHop >= 250) {
+      lastHop = now;
+      channel = channel % 11 + 1;
+      esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
     }
-
-    // periodic scan cycle
-    if (now - lastScan > 6000) {
-      lastScan = now;
-      if (useBle) BLEDevice::getScan()->start(0, nullptr, false);
-      if (wifiEver) wifiScan(s);
-      decayHits();
-      if (cursor >= s_hitCount) cursor = 0;
-    }
-
-    if (now - lastPaint > 400) {
+    if (now - lastPaint >= 350) {
       lastPaint = now;
-      paintHits(cursor, locate);
+      paintHits(cursor, details, signature, wantWifi, wantBle, wifiOk, bleOk, channel, inspector);
     }
     delay(20);
   }
-
-  if (useBle) BLEDevice::getScan()->stop();
+  portENTER_CRITICAL(&s_detectorLock);
   s_active = nullptr;
-}
-
-// ── BLE Inspector: raw advertisement decode ─────────────────────────
-static uint32_t lastPaint = 0;
-
-static void runInspector() {
-  chrome("BLE INSPECTOR", "RAW DECODE");
-  s_active = nullptr;
-  ensureBleStackReady();
-  BLEScan* scan = BLEDevice::getScan();
-  scan->stop();
-  scan->setAdvertisedDeviceCallbacks(&s_cb, true);
-  scan->setActiveScan(true);          // request scan response for detail
-  scan->setInterval(100);
-  scan->setWindow(100);
-  scan->setDuplicateFilter(true);
-  scan->start(0, nullptr, false);
-
-  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-  tft.drawString("raw advertisements", 8, 44, 1);
-
-  for (;;) {
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) break;
-    if (millis() - lastPaint > 500) {
-      lastPaint = millis();
-      paintHits(0, false);
-    }
-    delay(20);
+  s_inspectAll = false;
+  portEXIT_CRITICAL(&s_detectorLock);
+  if (ble.configured) {
+    struct BleStop { BLEScan* scan; bool stopped; } stop = {ble.scan, false};
+    const bool executed = runBleHostOperation([](void* context) {
+      BleStop& request = *static_cast<BleStop*>(context);
+      if (!request.scan->stop()) return;
+      request.scan->setAdvertisedDeviceCallbacks(nullptr);
+      request.scan->clearResults();
+      request.scan->setMaxResults(0xff);
+      request.stopped = true;
+    }, &stop);
+    if (!executed || !stop.stopped)
+      Serial.println("[detectors] BLE stop failed; bounded scan retained, restart recommended");
   }
-  scan->stop();
+  if (wantWifi) {
+    if (!stopDetectorWifi()) Serial.println("[detectors] WiFi shutdown failed");
+  }
 }
 
-// ── launcher ────────────────────────────────────────────────────────
+static void waitDetectorRelease() {
+  int x, y;
+  while (readTouchXYDismiss(x, y) || isButtonPressed(BTN_SELECT)) delay(10);
+  delay(360); // Drain the global feature-exit tap latch before changing screens.
+}
+
 void runLauncher() {
-  loadOuiFile("/flock/camera-ouis.txt", s_camOuis, &s_camOuiCount, 24);
-  loadOuiFile("/flock/gear-ouis.txt", s_gearOuis, &s_gearOuiCount, 24);
-
-  const int listCount = kSigCount + 1;   // + BLE Inspector
-  const int cols = 2;
-  const int cardW = (tft.width() - 24) / cols;
-  const int cardH = 46;
-  const int gridTop = 48;
-
+  loadOuiFile("/flock/camera-ouis.txt", s_camOuis);
+  loadOuiFile("/flock/gear-ouis.txt", s_gearOuis);
+  const int listCount = kSigCount + 1;
   int cursor = 0;
   bool redraw = true;
   feature_active = true;
   feature_exit_requested = false;
-
-  for (;;) {
+  const int top = 52;
+  const int rowHeight = 37;
+  const int bottom = touchNavContentBottomY() > 0 ? touchNavContentBottomY()
+                                                 : tft.height() - 60;
+  const int rows = max(1, (bottom - top - 18) / rowHeight);
+  while (!feature_exit_requested) {
+    const int first = (cursor / rows) * rows;
     if (redraw) {
       redraw = false;
-      setTouchButtonInputEnabled(true);
-      setTouchNavLabels(nullptr, nullptr, "Home", nullptr, nullptr);
-      featureClearContent(TFT_BLACK);
-      drawStatusBar(readBatteryVoltage(), true);
-
-      // brand header like the home screen
-      tft.fillRect(0, 0, tft.width(), 22, TFT_BLACK);
-      tft.setTextDatum(ML_DATUM);
-      tft.setTextColor(UI_ICON, TFT_BLACK);
-      tft.drawString("DETECTORS", 8, 11, 2);
-      tft.setTextDatum(MR_DATUM);
-      tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-      tft.drawString("passive sweep  //", tft.width() - 8, 12, 1);
-      tft.setTextDatum(TL_DATUM);
-      tft.drawFastHLine(0, 22, tft.width(), UI_LINE);
-
-      for (int i = 0; i < listCount; i++) {
-        const int cx = 8 + (i % cols) * (cardW + 8);
-        const int cy = gridTop + (i / cols) * (cardH + 8);
-        const bool sel = (i == cursor);
-        // card: hard edges, accent rail + corner ticks when selected
-        tft.fillRect(cx, cy, cardW, cardH, UI_FG);
-        if (sel) {
-          tft.drawRect(cx, cy, cardW, cardH, UI_ICON);
-          tft.fillRect(cx, cy, 3, cardH, UI_ICON);
-        } else {
-          tft.drawRect(cx, cy, cardW, cardH, UI_LINE);
-        }
-        const unsigned char* ic = (i < kSigCount) ? kSigIcons[i]
-                                                  : bitmap_icon_magnifying_glass;
-        tft.drawBitmap(cx + 10, cy + (cardH - 16) / 2, ic, 16, 16,
-                       sel ? UI_ICON : UI_TEXT);
-        tft.setTextColor(sel ? UI_ICON : UI_TEXT, UI_FG);
-        String name = (i < kSigCount) ? kSigs[i].detName : "BLE Inspector";
-        while (tft.textWidth(name, 2) > cardW - 38 && name.length() > 3) {
-          name.remove(name.length() - 1);
-        }
-        tft.drawString(name, cx + 32, cy + 8, 2);
-        tft.setTextColor(UI_DIM_TEXT, UI_FG);
-        tft.drawString(i < kSigCount ? kSigChips[i] : "RAW DECODE",
-                       cx + 32, cy + 27, 1);
-      }
-      setupTouchscreen();
+      chrome("DETECTORS", nullptr);
+      setTouchNavLabels("Back", "Down", "Open", "Up", "Page");
       redrawTouchButtonBar();
+      tft.fillRect(0, 46, tft.width(), bottom - 46, TFT_BLACK);
+      tft.setTextDatum(TL_DATUM);
+      for (int row = 0; row < rows && first + row < listCount; ++row) {
+        const int index = first + row;
+        const int y = top + row * rowHeight;
+        const bool selected = index == cursor;
+        const uint16_t background = selected ? UI_ICON : TFT_BLACK;
+        tft.fillRect(8, y, tft.width() - 16, rowHeight - 2, background);
+        tft.setTextColor(selected ? TFT_BLACK : UI_TEXT, background);
+        tft.drawString(index < kSigCount ? kSigs[index].detName : "BLE Inspector", 14, y + 3, 2);
+        tft.setTextColor(selected ? TFT_BLACK : UI_DIM_TEXT, background);
+        tft.drawString(index < kSigCount ? kSigChips[index] : "ADVERTISEMENT VIEW", 14, y + 22, 1);
+      }
+      char page[32];
+      snprintf(page, sizeof(page), "Page %u/%u  /  %u tools", cursor / rows + 1,
+               (listCount + rows - 1) / rows, listCount);
+      tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+      tft.drawString(page, 8, bottom - 14, 1);
     }
-
-    if (featureExitButtonPressed()) {
-      int hx, hy;
-      while (readTouchXYDismiss(hx, hy)) delay(10);
-      delay(350);
-      break;
-    }
-    if (isButtonPressed(BTN_UP) || isTouchNavButtonPressedEdge(BTN_UP)) {
-      delay(150);
+    if (isButtonPressedEdge(BTN_LEFT)) break;
+    bool open = false;
+    if (isButtonPressedEdge(BTN_UP)) {
       cursor = (cursor + listCount - 1) % listCount;
       redraw = true;
-      continue;
-    }
-    if (isButtonPressed(BTN_DOWN) || isTouchNavButtonPressedEdge(BTN_DOWN)) {
-      delay(150);
+    } else if (isButtonPressedEdge(BTN_DOWN)) {
       cursor = (cursor + 1) % listCount;
       redraw = true;
-      continue;
+    } else if (isButtonPressedEdge(BTN_RIGHT)) {
+      cursor = first + rows < listCount ? first + rows : 0;
+      redraw = true;
+    } else if (isButtonPressedEdge(BTN_SELECT)) open = true;
+    int x, y;
+    if (!open && readTouchXY(x, y) && x >= 8 && x < tft.width() - 8 &&
+        y >= top && y < top + rows * rowHeight) {
+      const int index = first + (y - top) / rowHeight;
+      if (index < listCount) { cursor = index; open = true; }
     }
-    if (isButtonPressed(BTN_SELECT)) {
-      delay(200);
+    if (open) {
+      waitDetectorRelease();
       if (cursor < kSigCount) runDetector(cursor);
-      else runInspector();
+      else runDetector(kSigCount - 1, true);
+      waitDetectorRelease();
       feature_active = true;
       feature_exit_requested = false;
       redraw = true;
-      continue;
-    }
-    int tx, ty;
-    if (readTouchXY(tx, ty)) {
-      delay(30);
-      for (int i = 0; i < listCount; i++) {
-        const int cx = 8 + (i % cols) * (cardW + 8);
-        const int cy = gridTop + (i / cols) * (cardH + 8);
-        if (tx >= cx && tx <= cx + cardW && ty >= cy && ty <= cy + cardH) {
-          if (i < kSigCount) runDetector(i);
-          else runInspector();
-          feature_active = true;
-          feature_exit_requested = false;
-          redraw = true;
-          break;
-        }
-      }
-      while (readTouchXYDismiss(tx, ty)) delay(10);
-      delay(150);
     }
     delay(15);
   }
+  waitDetectorRelease();
   setTouchButtonInputEnabled(false);
   feature_active = false;
   feature_exit_requested = false;
   is_main_menu = false;
-  showNotification("Detectors", "session ended");
-  delay(200);
 }
 
-}  // namespace Detectors
+} // namespace Detectors

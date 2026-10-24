@@ -1,7 +1,7 @@
 #pragma once
-// detectors.h — unified passive fingerprint detector engine. One engine,
-// many signature sets (BLE name/UUID/company ID + WiFi SSID/OUI). All
-// detection is receive-only; nothing transmits.
+// Passive broadcast candidates, not verified device identities. WiFi Cameras
+// includes built-in Flock indicators; optional SD lists add custom vendor
+// prefixes. The paged launcher exposes every detector on the physical display.
 #include <Arduino.h>
 
 namespace Detectors {

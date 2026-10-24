@@ -791,6 +791,10 @@ void startStatusBarTask() {
 
 void pauseBackgroundRadioTasks() {
   GpsWardriver::stopBackgroundIfRunning();
+  // Callers mark their feature active before entering. Wait for any background
+  // operation that already passed its idle check before reconfiguring radios.
+  WifiScan::waitForBackgroundScanner();
+  BleScan::waitForBackgroundScanner();
 }
 
 void updateStatusBar() {

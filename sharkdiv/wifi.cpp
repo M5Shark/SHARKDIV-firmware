@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "nvs_flash.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "icon.h"
 #include "shared.h"
@@ -2001,6 +2002,8 @@ bool isScanning = false;
 bool exitRequested = false;
 
 static TaskHandle_t bgScanTaskHandle = nullptr;
+static StaticSemaphore_t bgScanMutexStorage;
+static SemaphoreHandle_t bgScanMutex = nullptr;
 static volatile bool bgHasResults = false;
 static volatile uint32_t bgLastScanMs = 0;
 static const uint32_t BG_SCAN_INTERVAL_MS = 15000;
@@ -2028,6 +2031,8 @@ static void stopBgWifiScanIfRunning() {
 
 static void bgWifiScanTask(void* ) {
   for (;;) {
+    uint32_t sleepMs = 1000;
+    xSemaphoreTake(bgScanMutex, portMAX_DELAY);
     const uint32_t now = millis();
     if (bgBootMs == 0) bgBootMs = now;
 
@@ -2046,12 +2051,12 @@ static void bgWifiScanTask(void* ) {
 
           bgHasResults = true;
           bgLastScanMs = now;
-          vTaskDelay(BG_SCAN_INTERVAL_MS / portTICK_PERIOD_MS);
+          sleepMs = BG_SCAN_INTERVAL_MS;
         } else if (!bgScanRunning) {
 
-          vTaskDelay(2000 / portTICK_PERIOD_MS);
+          sleepMs = 2000;
         } else {
-          vTaskDelay(250 / portTICK_PERIOD_MS);
+          sleepMs = 250;
         }
       } else {
         int n = WiFi.scanComplete();
@@ -2059,14 +2064,14 @@ static void bgWifiScanTask(void* ) {
           bgHasResults = true;
           bgLastScanMs = now;
           bgScanRunning = false;
-          vTaskDelay(BG_SCAN_INTERVAL_MS / portTICK_PERIOD_MS);
+          sleepMs = BG_SCAN_INTERVAL_MS;
         } else if (n == WIFI_SCAN_FAILED) {
           bgScanRunning = false;
           WiFi.scanDelete();
-          vTaskDelay(2000 / portTICK_PERIOD_MS);
+          sleepMs = 2000;
         } else {
 
-          vTaskDelay(250 / portTICK_PERIOD_MS);
+          sleepMs = 250;
         }
       }
     } else {
@@ -2074,13 +2079,24 @@ static void bgWifiScanTask(void* ) {
       if (bgScanRunning) {
         stopBgWifiScanIfRunning();
       }
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
+    xSemaphoreGive(bgScanMutex);
+    vTaskDelay(pdMS_TO_TICKS(sleepMs));
   }
+}
+
+void waitForBackgroundScanner() {
+  if (!bgScanMutex) return;
+  xSemaphoreTake(bgScanMutex, portMAX_DELAY);
+  // Ownership is transferred before the foreground starts its own scan, so the
+  // background task cannot cancel the new scan on its next idle check.
+  if (bgScanRunning) stopBgWifiScanIfRunning();
+  xSemaphoreGive(bgScanMutex);
 }
 
 void startBackgroundScanner() {
   if (bgScanTaskHandle != nullptr) return;
+  if (!bgScanMutex) bgScanMutex = xSemaphoreCreateMutexStatic(&bgScanMutexStorage);
   xTaskCreatePinnedToCore(
     bgWifiScanTask,
     "bgWifiScan",

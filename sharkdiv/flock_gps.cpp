@@ -1,128 +1,87 @@
-// flock_gps.cpp — minimal GGA/RMC parser on the GPS UART (own instance;
-// only one feature runs at a time on this firmware).
 #include "flock_gps.h"
 #include "flock_config.h"
-#include "gps.h"
-#ifndef GPS_UART_BAUD
-#define GPS_UART_BAUD 9600
-#endif
-
+#include "FlockGpsParser.h"
 #include <HardwareSerial.h>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#ifndef GPS_UART_BAUD
+#define GPS_UART_BAUD 9600
+#endif
 
 namespace flock_gps {
-
 static HardwareSerial s_gps(1);
 static char s_line[96];
-static int s_len = 0;
-static float s_lat = NAN, s_lon = NAN;
-static char s_utc[10] = "";
+static size_t s_len = 0;
+static bool s_overflow = false, s_enabled = false, s_haveFix = false;
+static FlockGpsParser::Fix s_fix;
 static uint32_t s_fixMs = 0;
-
-// follow tracking: per-MAC bounding fixes
-struct Follow { char mac[18]; float lats[4]; float lons[4]; int n; };
+struct Follow { char mac[18]; float lats[4], lons[4]; int n; };
 static Follow s_follow[8];
-static int s_followCount = 0;
-
-static float nmeaToDeg(const char* v, const char* hemi) {
-  if (!v || !*v) return NAN;
-  const float raw = atof(v);
-  const int deg = (int)(raw / 100.0f);
-  const float minutes = raw - deg * 100.0f;
-  float d = deg + minutes / 60.0f;
-  if (hemi && (*hemi == 'S' || *hemi == 'W')) d = -d;
-  return d;
-}
-
-static void parseLine(const char* l) {
-  if (!strncmp(l, "$G", 2) && (strstr(l, "GGA") || strstr(l, "RMC"))) {
-    char copy[96];
-    strncpy(copy, l, 95); copy[95] = 0;
-    // GGA: $..GGA,time,lat,NS,lon,EW,fix,...
-    char* p = strtok(copy, ",");
-    for (int f = 0; p && f < 9; f++, p = strtok(nullptr, ",")) {
-      if (f == 1) strncpy(s_utc, p, 8), s_utc[8] = 0;
-      if (f == 2 && strlen(p) > 5) s_lat = nmeaToDeg(p, nullptr);
-      if (f == 3 && s_lat == s_lat) { if (*p == 'S') s_lat = -s_lat; }
-      if (f == 4 && strlen(p) > 5) s_lon = nmeaToDeg(p, nullptr);
-      if (f == 5 && s_lon == s_lon) { if (*p == 'W') s_lon = -s_lon; }
-      if (f == 6) { if (atoi(p) > 0) s_fixMs = millis(); }
-    }
-  }
-}
+static int s_followCount = 0, s_followNext = 0;
 
 void begin() {
-  s_len = 0;
-  s_fixMs = 0;
-  s_lat = NAN; s_lon = NAN;
+  s_len = 0; s_overflow = false; s_haveFix = false;
+  s_fix = FlockGpsParser::Fix{};
   s_gps.end();
   s_gps.begin(GPS_UART_BAUD, SERIAL_8N1, GPS_UART_RX, GPS_UART_TX);
+  s_enabled = true;
 }
-
+void end() { s_gps.end(); s_enabled = s_haveFix = false; }
 void poll() {
-  while (s_gps.available()) {
-    const char c = (char)s_gps.read();
+  if (!s_enabled) return;
+  // Bound one UI iteration even when a receiver produces continuous data.
+  for (int bytes = 0; bytes < 512 && s_gps.available(); ++bytes) {
+    const char c = char(s_gps.read());
+    if (c == '$') { s_len = 0; s_overflow = false; }
     if (c == '\n') {
-      s_line[s_len] = 0;
-      parseLine(s_line);
-      s_len = 0;
-    } else if (c != '\r' && s_len < (int)sizeof(s_line) - 1) {
-      s_line[s_len++] = c;
+      if (!s_overflow) {
+        s_line[s_len] = 0;
+        const auto result = FlockGpsParser::parse(s_line, s_fix);
+        if (result == FlockGpsParser::ValidFix) { s_haveFix = true; s_fixMs = millis(); }
+        else if (result == FlockGpsParser::NoFix) s_haveFix = false;
+      }
+      s_len = 0; s_overflow = false;
+    } else if (c != '\r') {
+      if (s_len < sizeof(s_line) - 1) s_line[s_len++] = c;
+      else s_overflow = true;
     }
   }
 }
-
-bool fixValid() { return s_fixMs != 0 && s_lat == s_lat && s_lon == s_lon; }
-float lat() { return s_lat; }
-float lon() { return s_lon; }
+bool fixValid() { return s_enabled && s_haveFix && uint32_t(millis() - s_fixMs) < 5000; }
+float lat() { return fixValid() ? s_fix.latitude : NAN; }
+float lon() { return fixValid() ? s_fix.longitude : NAN; }
 void utc(char* out, int cap) {
-  snprintf(out, cap, "%s", s_utc[0] ? s_utc : "--:--:--");
+  if (out && cap > 0) snprintf(out, cap, "%s", s_enabled && s_fix.utc[0] ? s_fix.utc : "--:--:--");
 }
-
 float distanceM(float lat1, float lon1, float lat2, float lon2) {
-  const float dLat = (lat2 - lat1) * 111194.9f;
-  const float dLon = (lon2 - lon1) * 111194.9f *
-                     cosf((lat1 + lat2) * 0.5f * 0.01745329f);
-  return sqrtf(dLat * dLat + dLon * dLon);
+  const float dy = (lat2 - lat1) * 111194.9f;
+  const float dx = (lon2 - lon1) * 111194.9f * cosf((lat1 + lat2) * 0.5f * 0.01745329f);
+  return sqrtf(dx*dx + dy*dy);
 }
-
 bool followAlert(const char* mac) {
+  if (!mac || !*mac || !fixValid()) return false;
   Follow* f = nullptr;
-  for (int i = 0; i < s_followCount; i++) {
-    if (!strcmp(s_follow[i].mac, mac)) { f = &s_follow[i]; break; }
-  }
+  for (int i = 0; i < s_followCount; ++i) if (!strcmp(s_follow[i].mac, mac)) { f = &s_follow[i]; break; }
   if (!f) {
-    if (s_followCount >= 8) s_followCount = 0;   // ring reuse
-    f = &s_follow[s_followCount++];
-    strncpy(f->mac, mac, 17); f->mac[17] = 0;
-    f->n = 0;
+    const int slot = s_followCount < 8 ? s_followCount++ : s_followNext;
+    if (s_followCount == 8) s_followNext = (slot + 1) % 8;
+    f = &s_follow[slot]; *f = Follow{};
+    snprintf(f->mac, sizeof(f->mac), "%s", mac);
   }
-  if (!fixValid()) return false;
-  // store up to 4 distinct positions (>100 m apart)
-  bool farEnough = true;
-  for (int i = 0; i < f->n; i++) {
-    if (distanceM(f->lats[i], f->lons[i], lat(), lon()) < 100.0f) {
-      farEnough = false;
+  bool distinct = true;
+  for (int i = 0; i < f->n; ++i) if (distanceM(f->lats[i], f->lons[i], lat(), lon()) < 100) distinct = false;
+  if (distinct) {
+    if (f->n == 4) {
+      memmove(f->lats, f->lats + 1, 3 * sizeof(float));
+      memmove(f->lons, f->lons + 1, 3 * sizeof(float));
+      f->n = 3;
     }
-  }
-  if (farEnough && f->n < 4) {
-    f->lats[f->n] = lat();
-    f->lons[f->n] = lon();
-    f->n++;
+    f->lats[f->n] = lat(); f->lons[f->n++] = lon();
   }
   if (f->n < flk::kFollowFixes) return false;
-  // any pair further than the threshold?
-  for (int i = 0; i < f->n; i++) {
-    for (int j = i + 1; j < f->n; j++) {
-      if (distanceM(f->lats[i], f->lons[i], f->lats[j], f->lons[j])
-          > flk::kFollowMinM) {
-        return true;
-      }
-    }
-  }
+  for (int i = 0; i < f->n; ++i) for (int j = i + 1; j < f->n; ++j)
+    if (distanceM(f->lats[i], f->lons[i], f->lats[j], f->lons[j]) > flk::kFollowMinM) return true;
   return false;
 }
-
-}  // namespace flock_gps
+} // namespace flock_gps

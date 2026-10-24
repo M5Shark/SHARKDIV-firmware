@@ -3439,6 +3439,8 @@ static void drawTabBar(const char* leftButton, bool leftDisabled,
 }
 
 static TaskHandle_t bgBleScanTaskHandle = nullptr;
+static StaticSemaphore_t bgBleScanMutexStorage;
+static SemaphoreHandle_t bgBleScanMutex = nullptr;
 static volatile bool bgHasResults = false;
 static volatile uint32_t bgLastScanMs = 0;
 static volatile bool bgBleScanRunning = false;
@@ -3465,34 +3467,43 @@ static void ensureBleInit() {
 }
 
 static void bgBleScanTask(void* ) {
-  ensureBleInit();
   for (;;) {
+    uint32_t sleepMs = 1000;
+    xSemaphoreTake(bgBleScanMutex, portMAX_DELAY);
     const uint32_t now = millis();
     if (bgBootMs == 0) bgBootMs = now;
 
     const bool idleOk = (now - bgBootMs) > BG_BOOT_GRACE_MS;
     if (settings().autoBleScan && idleOk && !feature_active && !in_sub_menu) {
-      if (fgBleScanInProgress) {
-        vTaskDelay(250 / portTICK_PERIOD_MS);
-        continue;
-      }
-      bgBleScanRunning = true;
-      isScanning = true;
-      bleResults = bleScan->start(2, false);
-      isScanning = false;
-      bgBleScanRunning = false;
-      if (bleResults.getCount() >= 0) {
+      ensureBleInit();
+      if (!fgBleScanInProgress && bleInitDone && bleScan) {
+        bgBleScanRunning = true;
+        isScanning = true;
+        bleResults = bleScan->start(2, false);
+        isScanning = false;
+        bgBleScanRunning = false;
         bgHasResults = (bleResults.getCount() > 0);
         bgLastScanMs = now;
+        sleepMs = BG_BLE_SCAN_INTERVAL_MS;
+      } else {
+        sleepMs = 250;
       }
-      vTaskDelay(BG_BLE_SCAN_INTERVAL_MS / portTICK_PERIOD_MS);
     } else {
       if (bgBleScanRunning) {
         stopBgBleScanIfRunning();
       }
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
+    xSemaphoreGive(bgBleScanMutex);
+    vTaskDelay(pdMS_TO_TICKS(sleepMs));
   }
+}
+
+void waitForBackgroundScanner() {
+  if (!bgBleScanMutex) return;
+  // A synchronous two-second background scan owns its result storage until it
+  // returns. Let it finish before another feature changes the shared scanner.
+  xSemaphoreTake(bgBleScanMutex, portMAX_DELAY);
+  xSemaphoreGive(bgBleScanMutex);
 }
 
 void displayScanning() {
@@ -3948,6 +3959,7 @@ void bleScanLoop() {
 
 void startBackgroundScanner() {
   if (bgBleScanTaskHandle != nullptr) return;
+  if (!bgBleScanMutex) bgBleScanMutex = xSemaphoreCreateMutexStatic(&bgBleScanMutexStorage);
   xTaskCreatePinnedToCore(
     bgBleScanTask,
     "bgBleScan",

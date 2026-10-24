@@ -5143,27 +5143,7 @@ void handleButtons() {
             if (current_menu_index == 3) {
                 handleSettingsSubmenuButtons();
             } else if (current_menu_index == 7) {
-                // Flock Scanner tile: launch the passive detector app.
-                feature_active = true;
-                feature_exit_requested = false;
-                setTouchButtonInputEnabled(true);
-                flock_menu::appSetup();
-                while (feature_active && !feature_exit_requested) {
-                    flock_menu::appLoop();
-                    if (featureExitButtonPressed()) break;
-                }
-                flock_menu::exit();
-                // Let the exit tap's latch expire so it cannot relaunch the
-                // app from the tile the moment the menu redraws.
-                delay(400);
-                setTouchButtonInputEnabled(false);
-                setTouchNavLabels(nullptr, nullptr, nullptr, nullptr, nullptr);
-                resetTouchNavHeldState();
-                feature_active = false;
-                feature_exit_requested = false;
-                is_main_menu = false;
-                displayMenu();
-                delay(200);
+                runFlockTileApp();
             } else {
                 updateActiveSubmenu();
 
@@ -5258,11 +5238,15 @@ void handleButtons() {
 }
 
 static void runFlockTileApp() {
-  // The Apps tile: a launcher list. Flock Scanner plus every registered
-  // user app; new apps built with the app builder appear here
-  // automatically. Tapping a row or SELECT launches; Exit returns home.
-  // The Apps area is FLOCK TOOLS ONLY — every capability of the detector
-  // as its own entry (tab + scan mode the scanner opens at).
+  // Physical SELECT and the touchscreen use the same nine-tool launcher.
+  // Consume the opening press before SELECT changes meaning inside a tool.
+  auto releaseOpeningPress = []() {
+    int tx, ty;
+    while (isPhysicalButtonPressed(BTN_SELECT) || readTouchXYDismiss(tx, ty)) delay(10);
+    delay(360);
+    resetTouchNavHeldState();
+  };
+  releaseOpeningPress();
   struct FlockTool {
     const char* name; uint8_t tab; uint8_t mode; const unsigned char* icon; const char* tag;
   };
@@ -5271,8 +5255,8 @@ static void runFlockTileApp() {
     { "WiFi Detect",    0, 1, bitmap_icon_wifi,      "SSID" },  // SSID/OUI + probe sniffer only
     { "BLE Detect",     0, 2, bitmap_icon_ble,       "BLE"  },  // passive BLE only
     { "Signal Meter",   0, 3, bitmap_icon_signal,    "RSSI" },  // focused RSSI meter (mode 3)
-    { "2.4G + LTE",     1, 0, bitmap_icon_antenna,   "SENS" },  // supporting sensors
-    { "Flock Score",    2, 0, bitmap_icon_chart_dot, "CONF" },  // confidence readout
+    { "RF Activity",    1, 0, bitmap_icon_antenna,   "RX"   },  // ambient RF measurements
+    { "Evidence",       2, 0, bitmap_icon_chart_dot, "INFO" },  // received indicators
     { "GPS / Map",      3, 0, bitmap_icon_satellite, "GEO"  },  // geotag + follow status
     { "Log / Export",   4, 0, bitmap_icon_save,      "CSV"  },  // session log + DeFlock export
     { "Flock Settings", 5, 0, bitmap_icon_setting,   "NVS"  },  // NVS settings
@@ -5280,6 +5264,7 @@ static void runFlockTileApp() {
   const int listCount = sizeof(kFlockTools) / sizeof(kFlockTools[0]);
 
   auto launchItem = [&](int idx) {
+    releaseOpeningPress();
     feature_active = true;
     feature_exit_requested = false;
     setTouchButtonInputEnabled(true);
@@ -5305,7 +5290,7 @@ static void runFlockTileApp() {
     if (redraw) {
       redraw = false;
       setTouchButtonInputEnabled(true);
-      setTouchNavLabels(nullptr, nullptr, "Home", nullptr, nullptr);
+      setTouchNavLabels("Home", "Next", "Open", "Prev", nullptr);
       featureClearContent(TFT_BLACK);
       drawBrandGrid(34, touchNavContentBottomY());
       setStatusTitle("FLOCK");
@@ -5337,29 +5322,25 @@ static void runFlockTileApp() {
       redrawTouchButtonBar();
     }
 
-    // Exit (center) or header tap leaves the launcher back to the home
-    // menu. The delay also lets the tap's latch expire so the home menu
-    // does not react to it.
-    if (featureExitButtonPressed()) {
+    // SELECT opens the highlighted tool; it must not be consumed by the
+    // generic SELECT-as-exit helper before the launch check below.
+    if (feature_exit_requested || isButtonPressedEdge(BTN_LEFT)) {
       int hx, hy;
       while (readTouchXYDismiss(hx, hy)) delay(10);
       delay(350);
       break;
     }
-    if (isButtonPressed(BTN_UP) || isTouchNavButtonPressedEdge(BTN_UP)) {
-      delay(150);
+    if (isButtonPressedEdge(BTN_UP)) {
       cursor = (cursor + listCount - 1) % listCount;
       redraw = true;
       continue;
     }
-    if (isButtonPressed(BTN_DOWN) || isTouchNavButtonPressedEdge(BTN_DOWN)) {
-      delay(150);
+    if (isButtonPressedEdge(BTN_DOWN)) {
       cursor = (cursor + 1) % listCount;
       redraw = true;
       continue;
     }
-    if (isButtonPressed(BTN_SELECT)) {
-      delay(200);
+    if (isButtonPressedEdge(BTN_SELECT)) {
       launchItem(cursor);
       feature_active = true;
       feature_exit_requested = false;
@@ -5391,6 +5372,8 @@ static void runFlockTileApp() {
   }
 
   setTouchButtonInputEnabled(false);
+  setTouchNavLabels(nullptr, nullptr, nullptr, nullptr, nullptr);
+  resetTouchNavHeldState();
   feature_active = false;
   feature_exit_requested = false;
   is_main_menu = false;

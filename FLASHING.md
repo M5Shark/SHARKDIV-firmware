@@ -131,4 +131,5 @@ Only a **merged** image containing the bootloader, partitions and app belongs at
 `0x0` on this ESP32-S3 board. `build/sharkdiv.ino.bin` is an **application-only**
 image for `0x10000`; writing it at `0x0` will not boot. Prefer `arduino-cli upload`
 for a complete local build. The browser installers still offer stable v1.7.29,
-not the unreleased v1.7.30-dev source changes.
+not the unreleased v1.7.30-flock source changes. See [Flock tools](docs/FLOCK.md)
+for the scanner repairs and how to distinguish received traffic from a match.

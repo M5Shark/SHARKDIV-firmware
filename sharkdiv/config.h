@@ -103,6 +103,7 @@ namespace BleScan {
   void exit();
   // Background BLE scanner: runs periodically in its own task, caching results.
   void startBackgroundScanner();
+  void waitForBackgroundScanner();
   // Last known BLE device count from background/foreground scans.
   int  getLastCount();
 }
@@ -185,6 +186,7 @@ namespace WifiScan {
   void wifiscanLoop();
   // Background WiFi scanner: runs when no feature is active, caching results.
   void startBackgroundScanner();
+  void waitForBackgroundScanner();
   // Last known WiFi network count from background/foreground scans.
   int  getLastCount();
   bool wifiCacheValidForReuse();

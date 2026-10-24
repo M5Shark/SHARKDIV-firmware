@@ -6,6 +6,12 @@ temporary directories and are removed when the scripts finish.
 
 - Passive radio: exact-length Find My advertisements, malformed/truncated input,
   bounded history, expiry across timer rollover and RF occupancy arithmetic.
+- Flock: published Wi-Fi/BLE indicators, malformed probe/advertisement rejection,
+  GPS GGA/RMC parsing, late phase entry, scan deadlines and single-radio modes.
+- Camera detectors: bounded observation tables, prefix validation and recovery
+  from Arduino's stale Wi-Fi started flag across repeated launches.
+- Background handoff: executes the actual scan loops while a foreground tool
+  opens; the former owner must finish before the new receiver starts.
 - Remote ID: independent on-wire fixtures, upstream reference comparisons,
   BLE/beacon framing, malformed/truncated messages and output atomicity.
 - Touch navigation: compiles the actual helper from the sketch; checks tap,
@@ -24,4 +30,4 @@ Build the firmware separately with `./build-div-mac.sh` and the dependencies in
 navigation and text, confirm receiver start/stop repeatedly, compare RF occupancy
 against a known signal, receive known Find My/Remote ID test broadcasts and test
 USB installation/power behavior. The browser manifest intentionally continues to
-serve stable v1.7.29 while the source is v1.7.30-dev.
+serve stable v1.7.29 while the source is v1.7.30-flock.
