@@ -53,6 +53,11 @@ indicators. The local bounded parsers are covered by host regression tests.
 ## Validation limits
 
 Host tests exercise matching, malformed packets, scan sequencing, GPS parsing,
-record handling and radio handoff. An ESP32-S3 build checks the pinned Arduino and
-NimBLE APIs. Neither substitutes for testing on an ESP32-DIV beside known devices.
+record handling and radio handoff. The ESP32-S3 build passed with the pinned
+Arduino and NimBLE APIs. On 2026-10-24, this build was flashed to an ESP32-S3
+revision 0.2 board with 16 MB flash; all four written segments passed hash
+verification. It booted as `v1.7.30-flock`. A live full-cycle scan received up to
+20 Wi-Fi APs, probe requests and over 1,400 BLE advertisements with zero reported
+Wi-Fi/BLE errors. No camera candidate matched during that check. Known-camera
+detection, GPS accuracy and physical SD export still need separate field checks.
 The public web installer still offers stable v1.7.29, not this development build.
