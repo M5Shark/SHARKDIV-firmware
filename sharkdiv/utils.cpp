@@ -1265,7 +1265,7 @@ void loading(int frameDelay, uint16_t color, int16_t x, int16_t y, int repeats, 
 void displayLogo(uint16_t color, int displayTime) {
   UNUSED(color);
 
-  // Glitch boot reel, then the SHARKDIV logo splash.
+  // Brief, static SHARKDIV identity screen.
   playSharkBoot();
 
   // CiferTech credits stay on the serial console (upstream attribution).

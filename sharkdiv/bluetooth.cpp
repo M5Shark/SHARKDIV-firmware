@@ -1,4 +1,7 @@
 #include "SettingsStore.h"
+#include "FindMyScanner.h"
+#include "RfOccupancy.h"
+#include "BleHostOperation.h"
 #include "Touchscreen.h"
 #include "config.h"
 #include "freertos/FreeRTOS.h"
@@ -109,7 +112,7 @@ static void bleSetJammerNavLabels() {
 }
 
 static void bleSetScannerNavLabels() {
-  setTouchNavLabels("Cal", "Scan", "Exit", nullptr, nullptr);
+  setTouchNavLabels("Cal", "Sample", "Exit", "Hold", "Reset");
 }
 
 static void bleSetEsbNavLabels() {
@@ -1747,20 +1750,9 @@ static constexpr unsigned long BTN_DEBOUNCE_MS = 220;
 static constexpr unsigned long UI_MS = 250;
 static constexpr int LINE_LEN = 36;
 
-enum HitKind : uint8_t {
-  HIT_FIND_MY = 0,  // Apple Offline Finding 0x12
-  HIT_NEW_AT = 1,   // Continuity 0x07 prefix 0x05 (New AirTag)
-};
-
-struct Hit {
-  uint8_t mac[6];
-  int8_t rssi;
-  uint8_t kind;
-  uint8_t status;
-  uint16_t hits;
-  uint32_t lastSeen;
-  bool dirty;
-};
+using Hit = FindMyScanner::Candidate;
+static constexpr uint32_t HIT_TTL_MS = 120000;
+static FindMyScanner::CandidateTable<MAX_HITS> s_candidates;
 
 static int iconX[ICON_NUM] = {10};
 static int iconY = STATUS_BAR_Y_OFFSET;
@@ -1778,13 +1770,15 @@ static int s_page = 0;
 
 static BLEScan* s_scan = nullptr;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
-static volatile bool s_hasUpdates = false;
+static bool s_hasUpdates = false;  // Protected by s_mux.
+static bool s_acceptResults = false;  // Protected by s_mux.
+static bool s_scanFailed = false;
 
 static char s_cacheFound[12] = {0};
 static char s_cacheState[10] = {0};
 
 static int listBottomY() {
-  return bleContentBottom() - 2;
+  return bleContentBottom() - 26;
 }
 
 static int rowsPerPage() {
@@ -1793,14 +1787,6 @@ static int rowsPerPage() {
     return 1;
   }
   return h / ROW_H;
-}
-
-static const char* kindLabel(uint8_t kind) {
-  switch (kind) {
-    case HIT_FIND_MY: return "FindMy";
-    case HIT_NEW_AT:  return "NewAT";
-    default:          return "Apple";
-  }
 }
 
 static void updateNavLabels() {
@@ -1852,7 +1838,7 @@ static void drawChrome() {
   tft.setTextSize(1);
   tft.setTextColor(ORANGE, TFT_BLACK);
   tft.setCursor(10, COL_Y);
-  tft.print("TYPE");
+  tft.print("TYPE?");
   tft.setCursor(58, COL_Y);
   tft.print("MAC");
   tft.setCursor(200, COL_Y);
@@ -1867,16 +1853,16 @@ static void updateHeader(bool force) {
     s_cacheState[0] = '\0';
   }
   char found[12];
-  snprintf(found, sizeof(found), "FOUND %d", s_hitCount);
+  snprintf(found, sizeof(found), "RECENT %d", s_hitCount);
   paintField(10, HDR_Y, 90, s_cacheFound, sizeof(s_cacheFound), found, WHITE);
   paintField(200, HDR_Y, 40, s_cacheState, sizeof(s_cacheState),
-             s_scanning ? "LIVE" : "IDLE",
+             s_scanFailed ? "ERROR" : (s_scanning ? "LIVE" : "PAUSE"),
              s_scanning ? ORANGE : UI_DIM_TEXT);
 }
 
 static void formatRow(const Hit& h, char* out, size_t outSz) {
   snprintf(out, outSz, "%-6s %02X:%02X:%02X:%02X:%02X:%02X %4d",
-           kindLabel(h.kind),
+           "FindMy",
            h.mac[0], h.mac[1], h.mac[2], h.mac[3], h.mac[4], h.mac[5],
            (int)h.rssi);
 }
@@ -1923,7 +1909,7 @@ static void redrawList() {
     tft.setTextSize(1);
     tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
     tft.setCursor(10, LIST_Y + 8);
-    tft.print(s_scanning ? "Listening for AirTags..." : "Press Start to scan");
+    tft.print(s_scanning ? "Listening for Find My..." : "Press Start to scan");
     s_listDirty = false;
     return;
   }
@@ -1933,124 +1919,50 @@ static void redrawList() {
     paintRow(i, absIndex == s_selected);
   }
   s_listDirty = false;
-  for (int i = 0; i < s_hitCount; i++) {
-    s_hits[i].dirty = false;
-  }
 }
 
-static void refreshDirtyRows() {
-  const int per = rowsPerPage();
-  const int start = s_page * per;
-  const int end = start + per;
-  bool any = s_listDirty;
-  for (int i = start; i < end && i < s_hitCount; i++) {
-    if (s_hits[i].dirty) {
-      any = true;
-      break;
-    }
+// Never draw from callback-owned storage or hold the lock during TFT I/O.
+static bool snapshotHits() {
+  portENTER_CRITICAL(&s_mux);
+  const uint32_t now = millis();
+  const bool expired = s_candidates.expire(now, HIT_TTL_MS);
+  const bool changed = expired || s_hasUpdates;
+  if (changed) {
+    s_hitCount = (int)s_candidates.count;
+    memcpy(s_hits, s_candidates.records, s_candidates.count * sizeof(Hit));
+    s_hasUpdates = false;
   }
-  if (!any) {
-    return;
-  }
-  for (int i = 0; i < per; i++) {
-    const int absIndex = start + i;
-    if (absIndex < s_hitCount && (s_listDirty || s_hits[absIndex].dirty)) {
-      paintRow(i, absIndex == s_selected);
-      if (absIndex < s_hitCount) {
-        s_hits[absIndex].dirty = false;
-      }
-    } else if (s_listDirty && absIndex >= s_hitCount) {
-      paintRow(i, false);
-    }
-  }
-  s_listDirty = false;
+  portEXIT_CRITICAL(&s_mux);
+  if (changed) s_listDirty = true;
+  return changed;
 }
 
-static int findHitIndex(const uint8_t mac[6]) {
-  for (int i = 0; i < s_hitCount; i++) {
-    if (memcmp(s_hits[i].mac, mac, 6) == 0) {
-      return i;
-    }
+static void drawCandidateNote(uint32_t now) {
+  const int y = listBottomY() + 3;
+  tft.fillRect(0, y, SCREEN_WIDTH, 22, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.setCursor(10, y);
+  if (s_hitCount > 0 && s_selected < s_hitCount) {
+    const Hit& h = s_hits[s_selected];
+    tft.printf("%u reports | seen %lus ago", (unsigned)h.hits,
+               (unsigned long)((now - h.lastSeen) / 1000));
+  } else {
+    tft.print("Passive scan | 2 minute history");
   }
-  return -1;
-}
-
-static void upsertHit(const uint8_t mac[6], int8_t rssi, uint8_t kind, uint8_t status) {
-  const int idx = findHitIndex(mac);
-  if (idx >= 0) {
-    Hit& h = s_hits[idx];
-    if (h.rssi != rssi || h.status != status || h.kind != kind) {
-      h.dirty = true;
-    }
-    h.rssi = rssi;
-    h.kind = kind;
-    h.status = status;
-    h.hits++;
-    h.lastSeen = millis();
-    return;
-  }
-  if (s_hitCount >= MAX_HITS) {
-    // Drop weakest RSSI to make room.
-    int weakest = 0;
-    for (int i = 1; i < s_hitCount; i++) {
-      if (s_hits[i].rssi < s_hits[weakest].rssi) {
-        weakest = i;
-      }
-    }
-    if (rssi < s_hits[weakest].rssi) {
-      return;
-    }
-    memmove(&s_hits[weakest], &s_hits[weakest + 1],
-            (size_t)(s_hitCount - weakest - 1) * sizeof(Hit));
-    s_hitCount--;
-    s_listDirty = true;
-  }
-
-  Hit& h = s_hits[s_hitCount++];
-  memcpy(h.mac, mac, 6);
-  h.rssi = rssi;
-  h.kind = kind;
-  h.status = status;
-  h.hits = 1;
-  h.lastSeen = millis();
-  h.dirty = true;
-  s_listDirty = true;
-}
-
-static bool parseAppleAdv(const uint8_t* data, size_t len,
-                          uint8_t* kindOut, uint8_t* statusOut) {
-  if (!data || len < 4) {
-    return false;
-  }
-  // NimBLE manufacturer data: company ID LE + payload.
-  if (data[0] != 0x4C || data[1] != 0x00) {
-    return false;
-  }
-  const uint8_t appleType = data[2];
-  if (appleType == 0x12) {
-    *kindOut = HIT_FIND_MY;
-    *statusOut = (len > 4) ? data[4] : 0;
-    return true;
-  }
-  // Continuity Proximity Pairing â€” New AirTag prefix 0x05.
-  if (appleType == 0x07 && len >= 5 && data[4] == 0x05) {
-    *kindOut = HIT_NEW_AT;
-    *statusOut = data[4];
-    return true;
-  }
-  return false;
+  tft.setCursor(10, y + 11);
+  tft.print("Candidate only; address may rotate");
 }
 
 class AdvCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice* device) override {
-    if (!s_scanning || !device || !device->haveManufacturerData()) {
+    if (!device || !device->haveManufacturerData()) {
       return;
     }
     const std::string md = device->getManufacturerData();
-    uint8_t kind = 0;
     uint8_t status = 0;
-    if (!parseAppleAdv(reinterpret_cast<const uint8_t*>(md.data()), md.size(),
-                       &kind, &status)) {
+    if (!FindMyScanner::parseManufacturerData(
+            reinterpret_cast<const uint8_t*>(md.data()), md.size(), status)) {
       return;
     }
 
@@ -2068,47 +1980,91 @@ class AdvCallbacks : public BLEAdvertisedDeviceCallbacks {
     const int8_t rssi = (int8_t)device->getRSSI();
 
     portENTER_CRITICAL(&s_mux);
-    upsertHit(mac, rssi, kind, status);
-    s_hasUpdates = true;
+    if (s_acceptResults) {
+      s_candidates.observe(mac, rssi, status, millis());
+      s_hasUpdates = true;
+    }
     portEXIT_CRITICAL(&s_mux);
   }
 };
 
 static AdvCallbacks s_callbacks;
 
+// The NimBLE host owns its scan-result vector. Both start() and stop() may
+// clear that vector, so all lifecycle mutation runs between host GAP events.
+static bool runScanLifecycle(bool start) {
+  struct Command {
+    BLEScan* scan;
+    bool start;
+    bool success;
+  } command = {s_scan, start, false};
+  const bool executed = runBleHostOperation([](void* context) {
+    Command& command = *static_cast<Command*>(context);
+    BLEScan* scan = command.scan ? command.scan : BLEDevice::getScan();
+    command.scan = scan;
+    if (!scan || !scan->stop()) return;
+    scan->setAdvertisedDeviceCallbacks(nullptr);
+    scan->clearResults();
+    scan->setMaxResults(0xFF);
+    if (!command.start) {
+      command.success = true;
+      return;
+    }
+    scan->setAdvertisedDeviceCallbacks(&s_callbacks, true);
+    scan->setActiveScan(false);  // Receive without sending scan requests.
+    scan->setMaxResults(0);      // Callback-only, bounded application storage.
+    scan->setInterval(80);
+    scan->setWindow(60);
+    scan->setDuplicateFilter(false);
+    portENTER_CRITICAL(&s_mux);
+    s_acceptResults = true;
+    portEXIT_CRITICAL(&s_mux);
+    // This overload returns immediately; the two-argument overload blocks.
+    command.success = scan->start(0, nullptr, false);
+    if (!command.success) {
+      portENTER_CRITICAL(&s_mux);
+      s_acceptResults = false;
+      portEXIT_CRITICAL(&s_mux);
+      if (scan->stop()) {
+        scan->setAdvertisedDeviceCallbacks(nullptr);
+        scan->clearResults();
+        scan->setMaxResults(0xFF);
+      }
+    }
+  }, &command);
+  s_scan = command.scan;
+  return executed && command.success;
+}
+
 static void stopScan() {
-  if (s_scan) {
-    s_scan->stop();
-    s_scan->setAdvertisedDeviceCallbacks(nullptr);
-  }
+  portENTER_CRITICAL(&s_mux);
+  s_acceptResults = false;
+  portEXIT_CRITICAL(&s_mux);
   s_scanning = false;
+  s_listDirty = true;
+  if (s_scan && !runScanLifecycle(false)) s_scanFailed = true;
 }
 
 static void startScan() {
-  if (!s_scan) {
-    ensureBleStackReady();
-    s_scan = BLEDevice::getScan();
+  s_scanFailed = false;
+  if (!ensureBleStackReady()) {
+    s_scanFailed = true;
+    return;
   }
-  s_scan->stop();
-  s_scan->setAdvertisedDeviceCallbacks(&s_callbacks, true);
-  s_scan->setActiveScan(true);
-  s_scan->setInterval(80);
-  s_scan->setWindow(60);
-  s_scan->setDuplicateFilter(false);
-  s_scanning = true;
-  // Non-blocking continuous scan. start(0, false) is the BLOCKING overload
-  // and hangs forever with duration 0.
-  s_scan->start(0, nullptr, false);
+  s_scanning = runScanLifecycle(true);
+  s_scanFailed = !s_scanning;
+  s_listDirty = true;
 }
 
 static void clearHits() {
   portENTER_CRITICAL(&s_mux);
+  s_candidates.clear();
+  s_hasUpdates = false;
+  portEXIT_CRITICAL(&s_mux);
   s_hitCount = 0;
   s_selected = 0;
   s_page = 0;
   s_listDirty = true;
-  s_hasUpdates = true;
-  portEXIT_CRITICAL(&s_mux);
 }
 
 static void clampSelection() {
@@ -2206,6 +2162,10 @@ static void runUI() {
       }
     }
     tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+    tft.setTextSize(1);
+    tft.setTextColor(UI_TEXT, DARK_GRAY);
+    tft.setCursor(35, 24);
+    tft.print("Find My candidates");
     s_uiDrawn = true;
   }
 
@@ -2245,20 +2205,17 @@ void airTagSnifferSetup() {
   s_hitCount = 0;
   s_selected = 0;
   s_page = 0;
+  portENTER_CRITICAL(&s_mux);
+  s_acceptResults = false;
+  s_candidates.clear();
   s_hasUpdates = false;
+  portEXIT_CRITICAL(&s_mux);
+  s_scanFailed = false;
   s_lastBtnMs = 0;
   s_lastUiMs = 0;
   s_cacheFound[0] = '\0';
   s_cacheState[0] = '\0';
   s_scan = nullptr;
-
-  // Stop any other BLE scan that may be holding the radio.
-  {
-    BLEScan* existing = BLEDevice::getScan();
-    if (existing) {
-      existing->stop();
-    }
-  }
 
   float v = readBatteryVoltage();
   drawStatusBar(v, true);
@@ -2292,28 +2249,19 @@ void airTagSnifferLoop() {
   maintainTouchNavBar();
 
   const unsigned long now = millis();
-  if (s_hasUpdates || (now - s_lastUiMs >= UI_MS)) {
+  if (now - s_lastUiMs >= UI_MS) {
     s_lastUiMs = now;
-    bool updates = false;
-    portENTER_CRITICAL(&s_mux);
-    updates = s_hasUpdates;
-    s_hasUpdates = false;
-    portEXIT_CRITICAL(&s_mux);
-
-    if (updates || s_listDirty) {
-      clampSelection();
-      updateHeader(false);
-      if (s_listDirty) {
-        redrawList();
-      } else {
-        refreshDirtyRows();
-      }
+    snapshotHits();
+    if (s_scanning && s_scan && !s_scan->isScanning()) {
+      stopScan();
+      s_scanFailed = true;
+      updateHeader(true);
+      updateNavLabels();
     }
-  }
-
-  // Keep continuous scan alive if NimBLE stopped it.
-  if (s_scanning && s_scan && !s_scan->isScanning()) {
-    s_scan->start(0, nullptr, false);
+    clampSelection();
+    updateHeader(false);
+    if (s_listDirty) redrawList();
+    drawCandidateNote(millis());
   }
 
   if (feature_exit_requested) {
@@ -4035,7 +3983,6 @@ namespace Scanner {
 #define CSN NRF24_SCAN_CSN
 
 #define CHANNELS  NRF24_CHANNEL_COUNT
-int channel[CHANNELS];
 
 #define N NRF24_CHANNEL_COUNT
 uint8_t values[N];
@@ -4043,9 +3990,8 @@ uint8_t values[N];
 static bool uiDrawn = false;
 
 static constexpr uint16_t DISPLAY_SWEEPS     = 10;
-static constexpr uint16_t RX_SETTLE_US       = 100;
+static constexpr uint16_t RX_SETTLE_US       = 130;
 static constexpr uint16_t RPD_DWELL_US       = 50;
-static constexpr uint32_t UI_THROTTLE_MS     = 35;
 static constexpr uint16_t BUTTON_POLL_STRIDE = 8;
 
 #define _NRF24_CONFIG   0x00
@@ -4058,6 +4004,10 @@ int backgroundNoise[CHANNELS] = {0};
 static bool s_noiseCalibrated = false;
 
 volatile bool scanning = true;
+static bool s_paused = false;
+static bool s_cancelMeasurement = false;
+enum ScannerAction : uint8_t { ACTION_NONE, ACTION_CALIBRATE, ACTION_SAMPLE, ACTION_RESET };
+static ScannerAction s_pendingAction = ACTION_NONE;
 
 static constexpr int kScannerGraphTop = 190;
 static constexpr int kScannerLogBottom = kScannerGraphTop - 6;
@@ -4067,12 +4017,6 @@ static constexpr int kScannerBoxPad = 4;
 static constexpr int kScannerBoxHeaderH = 15;
 static constexpr int kScannerStatusY = kScannerToolbarBottom + kScannerToolbarGap;
 static constexpr int kScannerGraphMarginX = 6;
-static constexpr int kScannerBarColGap = 10;
-#if BOARD_HAS_ESP32S3
-static constexpr int kScannerBarsPerCol = 64;
-#else
-static constexpr int kScannerBarsPerCol = 32;
-#endif
 static constexpr int kScannerStatusLineCount = 6;
 static constexpr int kScannerStatusTextY = kScannerStatusY + kScannerBoxHeaderH;
 static constexpr int kScannerStatusBoxH = 91;
@@ -4120,7 +4064,7 @@ void setChannel(uint8_t channel) {
 
 void powerUp() {
   setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) | 0x02);
-  delayMicroseconds(130);
+  delay(5);  // Allow the crystal to settle after power-down.
 }
 
 void powerDown() {
@@ -4141,55 +4085,19 @@ void setRX() {
   delayMicroseconds(100);
 }
 
-void scroll() {
-  for (int i = 3; i < MAX_LINES - 1; i++) {
-    Buffer[i] = Buffer[i + 1];
-    Buffercolor[i] = Buffercolor[i + 1];
-  }
-}
-
-void Print(String text, uint16_t color, bool extraSpace = false) {
-  const bool scrolled = (Index >= MAX_LINES - 1);
-  if (scrolled) {
-    scroll();
-    Index = MAX_LINES - 1;
-  }
-
-  const int firstNewIndex = Index;
-  Buffer[Index] = text;
-  Buffercolor[Index] = color;
-  Index++;
-
-  if (extraSpace && Index < MAX_LINES) {
-    Buffer[Index] = "";
-    Buffercolor[Index] = WHITE;
-    Index++;
-  }
-
-  static auto redrawLogLine = [](int bufIndex) {
-    if (bufIndex < 3) {
-      return;
-    }
-    const int yPos = kScannerLogStartY + (bufIndex - 3) * LINE_HEIGHT;
-    if (yPos + LINE_HEIGHT > kScannerLogEndY) {
-      return;
-    }
-    tft.fillRect(8, yPos, tft.width() - 16, LINE_HEIGHT, TFT_BLACK);
+void Print(String text, uint16_t color, bool /*extraSpace*/ = false) {
+  // Keep the latest two messages inside the visible activity area.
+  Buffer[3] = Buffer[4];
+  Buffercolor[3] = Buffercolor[4];
+  Buffer[4] = text;
+  Buffercolor[4] = color;
+  for (int row = 0; row < 2; ++row) {
+    const int y = kScannerLogStartY + row * LINE_HEIGHT;
+    tft.fillRect(8, y, tft.width() - 16, LINE_HEIGHT, TFT_BLACK);
     tft.setTextSize(1);
-    tft.setTextColor(Buffercolor[bufIndex], TFT_BLACK);
-    tft.setCursor(8, yPos);
-    tft.print(Buffer[bufIndex]);
-  };
-
-  if (scrolled) {
-    for (int i = 3; i < Index; i++) {
-      redrawLogLine(i);
-    }
-    return;
-  }
-
-  for (int i = firstNewIndex; i < Index; i++) {
-    redrawLogLine(i);
+    tft.setTextColor(Buffercolor[row + 3], TFT_BLACK);
+    tft.setCursor(8, y);
+    tft.print(Buffer[row + 3]);
   }
 }
 
@@ -4199,41 +4107,36 @@ static constexpr unsigned long kScannerNavDebounceMs = 80;
 void calibrateBackgroundNoise();
 void scan();
 static String scannerChannelGHzText(int ch);
-static String scannerBandHint(int ch);
+static void scannerResetMeasurements();
 
-static void scannerWaitNavRelease(int pin) {
-  const uint32_t t0 = millis();
-  while (isTouchNavButtonPressed(pin) && millis() - t0 < 400) {
-    delay(5);
-  }
-  delay(30);
+static void scannerUpdateNavLabels() {
+  setTouchNavLabels("Cal", "Sample", "Exit", s_paused ? "Live" : "Hold", "Reset");
+  redrawTouchButtonBar();
 }
 
 void scannerHandleNavButtons() {
-  if (!featureHasTouchNavBar()) {
-    return;
-  }
   const uint32_t now = millis();
-  if (now - s_scannerLastBtnMs < kScannerNavDebounceMs) {
+  if (now - s_scannerLastBtnMs < kScannerNavDebounceMs) return;
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    s_pendingAction = ACTION_CALIBRATE;
+  } else if (isButtonPressedEdge(BTN_DOWN)) {
+    s_pendingAction = ACTION_SAMPLE;
+  } else if (isButtonPressedEdge(BTN_RIGHT)) {
+    s_pendingAction = ACTION_RESET;
+    s_cancelMeasurement = true;
+  } else if (isButtonPressedEdge(BTN_UP)) {
+    s_paused = !s_paused;
+    s_cancelMeasurement = true;
+    scannerUpdateNavLabels();
+  } else {
     return;
   }
-
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
-    calibrateBackgroundNoise();
-    s_scannerLastBtnMs = millis();
-    scannerWaitNavRelease(BTN_LEFT);
-    return;
-  }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
-    scan();
-    s_scannerLastBtnMs = millis();
-    scannerWaitNavRelease(BTN_DOWN);
-  }
+  s_scannerLastBtnMs = now;
 }
 
 static void scannerPollNavButtons() {
   maintainTouchNavBar();
-  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+  if (feature_active && (feature_exit_requested || isSelectButtonPressed() || featureExitButtonPressed())) {
     feature_exit_requested = true;
     scanning = false;
     return;
@@ -4241,95 +4144,53 @@ static void scannerPollNavButtons() {
   scannerHandleNavButtons();
 }
 
-void calibrateBackgroundNoise() {
-
-  Print("[!] Calibrating noise floor...", UI_TEXT, false);
-
-  memset(backgroundNoise, 0, sizeof(backgroundNoise));
-  memset(channel, 0, sizeof(channel));
-
-  // 2 rounds x 50 sweeps = 100 RPD samples per channel.
-  for (int i = 0; i < 2; i++) {
-    disable();
-    for (int j = 0; j < 50; j++) {
-      for (int i = 0; i < CHANNELS; i++) {
-        if ((i % BUTTON_POLL_STRIDE) == 0) {
-          scannerPollNavButtons();
-        }
-
-        setRegister(_NRF24_RF_CH, (uint8_t)i);
-        enable();
-        delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
-        disable();
-        if (carrierDetected()) channel[i]++;
-      }
-    }
-    for (int j = 0; j < CHANNELS; j++) {
-      backgroundNoise[j] += channel[j];
-    }
-    memset(channel, 0, sizeof(channel));
-  }
-
-  int maxNoiseCh = 0;
-  int maxNoise = 0;
-  for (int i = 0; i < CHANNELS; i++) {
-    // Normalize to "hits per 10 sweeps" so it can be subtracted from the
-    // 10-sweep display frames and the 50-sweep scan() alike.
-    backgroundNoise[i] /= 10;
-    if (backgroundNoise[i] > 10) {
-      backgroundNoise[i] = 10;
-    }
-    if (backgroundNoise[i] > maxNoise) {
-      maxNoise = backgroundNoise[i];
-      maxNoiseCh = i;
-    }
-  }
-  s_noiseCalibrated = true;
-
-  Print("[+] Calibrate done  Ch" + String(maxNoiseCh) + " " + scannerChannelGHzText(maxNoiseCh) + "GHz", UI_WARN, false);
-}
-
-void scan() {
-  Print("[!] Scan refresh...", UI_TEXT, false);
-  memset(channel, 0, sizeof(channel));
+// Polls only queue work; never recurse into another sweep from a sweep.
+static bool scannerCollectSamples(uint16_t sweeps, uint16_t* hits) {
+  memset(hits, 0, sizeof(uint16_t) * CHANNELS);
+  s_cancelMeasurement = false;
   disable();
-  for (int j = 0; j < 50; j++) {
-    for (int i = 0; i < CHANNELS; i++) {
-      if ((i % BUTTON_POLL_STRIDE) == 0) {
+  for (uint16_t pass = 0; pass < sweeps; ++pass) {
+    for (int ch = 0; ch < CHANNELS; ++ch) {
+      if ((ch % BUTTON_POLL_STRIDE) == 0) {
         scannerPollNavButtons();
+        if (!scanning || feature_exit_requested || s_cancelMeasurement) {
+          disable();
+          return false;
+        }
       }
-
-      setRegister(_NRF24_RF_CH, (uint8_t)i);
+      setRegister(_NRF24_RF_CH, (uint8_t)ch);
       enable();
       delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
       disable();
-      if (carrierDetected()) channel[i]++;
+      if (carrierDetected()) ++hits[ch];
     }
+    yield();
   }
+  return true;
+}
 
-  int peakCh = 0;
-  int peakHits = 0;
-  int active = 0;
-  for (int i = 0; i < CHANNELS; i++) {
-    if (s_noiseCalibrated) {
-      channel[i] -= backgroundNoise[i] * 5;  // 50 sweeps vs 10-sweep noise units
-      if (channel[i] < 0) {
-        channel[i] = 0;
-      }
-    }
-    if (channel[i] > 0) {
-      active++;
-    }
-    if (channel[i] > peakHits) {
-      peakHits = channel[i];
-      peakCh = i;
-    }
+static void scannerPresentSamples(const uint16_t* hits, uint16_t samples);
+static void scannerInvalidatePlot();
+
+void calibrateBackgroundNoise() {
+  Print("Sampling baseline (100 sweeps)", UI_TEXT);
+  uint16_t hits[CHANNELS];
+  if (!scannerCollectSamples(100, hits)) return;
+  for (int ch = 0; ch < CHANNELS; ++ch) {
+    backgroundNoise[ch] = RfOccupancy::percent(hits[ch], 100);
   }
-  if (peakHits > 0) {
-    Print("[+] Scan done  " + String(active) + " hit(s)  peak Ch" + String(peakCh), UI_WARN, false);
-  } else {
-    Print("[*] Scan done  no carriers", UI_DIM_TEXT, false);
-  }
+  s_noiseCalibrated = true;
+  scannerInvalidatePlot();
+  scannerPresentSamples(hits, 100);
+  Print("Baseline set; Reset restores raw", UI_DIM_TEXT);
+}
+
+void scan() {
+  uint16_t hits[CHANNELS];
+  Print("Sampling 50 sweeps", UI_TEXT);
+  if (!scannerCollectSamples(50, hits)) return;
+  scannerPresentSamples(hits, 50);
+  Print("Sample complete", UI_DIM_TEXT);
 }
 
 void runUI() {
@@ -4378,8 +4239,8 @@ void runUI() {
       animationState = 2;
 
       switch (activeIcon) {
-        case 0: calibrateBackgroundNoise(); break;
-        case 1: scan(); break;
+        case 0: s_pendingAction = ACTION_CALIBRATE; break;
+        case 1: s_pendingAction = ACTION_SAMPLE; break;
       }
     } else if (animationState == 2) {
       animationState = 0;
@@ -4433,7 +4294,6 @@ struct ScannerPlotLayout {
 };
 
 static ScannerPlotLayout s_plot;
-static uint8_t s_smoothValues[N];
 static uint8_t s_prevBarPx[N];
 static bool s_graphChromeDrawn = false;
 static int s_lastPeakCh = -1;
@@ -4449,21 +4309,11 @@ static uint16_t s_statusLineColor[kScannerStatusLineCount];
 static bool s_statusStaticDrawn = false;
 
 
-static int scannerBarCol0X() {
-  const int barsSpan = (kScannerBarsPerCol * 2) + kScannerBarColGap;
-  return s_plot.axisX + max(0, (s_plot.plotWidth - barsSpan) / 2);
-}
-
 static int scannerBarX(int ch) {
-  const int col0 = scannerBarCol0X();
-  if (ch < kScannerBarsPerCol) {
-    return col0 + ch;
-  }
-  return col0 + kScannerBarsPerCol + kScannerBarColGap + (ch - kScannerBarsPerCol);
+  return s_plot.axisX + 1 + (ch * (s_plot.plotWidth - 3)) / (N - 1);
 }
 
 static constexpr int kScannerGridDivisions = 4;
-static constexpr int kScannerMinBarPx = 5;
 
 static int scannerHorizGridY(int lineIndex) {
   return s_plot.plotTop + ((s_plot.plotHeight * lineIndex) + (kScannerGridDivisions / 2)) / kScannerGridDivisions;
@@ -4486,7 +4336,6 @@ static void scannerDrawVertGridLines() {
 static void scannerResetGraphState() {
   s_graphChromeDrawn = false;
   s_plot.valid = false;
-  memset(s_smoothValues, 0, sizeof(s_smoothValues));
   memset(s_prevBarPx, 0, sizeof(s_prevBarPx));
   memset(values, 0, sizeof(values));
   s_lastPeakCh = -1;
@@ -4556,14 +4405,15 @@ static void scannerDrawGraphChrome() {
 
   tft.setTextSize(1);
   tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-  tft.drawString("2.4 GHz Spectrum", (screenW - 96) / 2, s_plot.graphTop + 2);
+  tft.drawString(s_noiseCalibrated ? "Above baseline  0-100 pp" : "Sample occupancy  0-100%",
+                 (screenW - 138) / 2, s_plot.graphTop + 2);
 
   const int labelY = s_plot.plotBottom + 2;
   const int endMhz = 2400 + N - 1;
   char lo[8], mid[8], hi[8];
-  snprintf(lo, sizeof(lo), "2.40");
-  snprintf(mid, sizeof(mid), "2.%02u", (unsigned)((2400 + N / 2) % 100));
-  snprintf(hi, sizeof(hi), "2.%02u", (unsigned)(endMhz % 100));
+  snprintf(lo, sizeof(lo), "2400");
+  snprintf(mid, sizeof(mid), "%u", (unsigned)(2400 + N / 2));
+  snprintf(hi, sizeof(hi), "%u", (unsigned)endMhz);
   tft.drawString(lo, s_plot.axisX + 2, labelY);
   tft.drawString(mid, s_plot.axisX + s_plot.plotWidth / 2 - 8, labelY);
   tft.drawString(hi, s_plot.plotRight - 24, labelY);
@@ -4593,27 +4443,8 @@ static String scannerChannelGHzText(int ch) {
   return String(buf);
 }
 
-static String scannerBandHint(int ch) {
-  if (ch == 2 || ch == 26 || ch == 80) {
-    return "BLE";
-  }
-  if (ch >= 10 && ch <= 15) {
-    return "WiFi Ch1";
-  }
-  if (ch >= 34 && ch <= 40) {
-    return "WiFi Ch6";
-  }
-  if (ch >= 59 && ch <= 65) {
-    return "WiFi Ch11";
-  }
-  if (ch >= 76 && ch <= 86) {
-    return "RC/Video";
-  }
-  return "ISM";
-}
-
 static String scannerChannelBandLine(int ch) {
-  return "Ch " + String(ch) + "  " + scannerBandHint(ch);
+  return "Ch " + String(ch) + " | RPD > -64 dBm";
 }
 
 static String scannerFitStatusText(const String& text) {
@@ -4635,7 +4466,7 @@ static String scannerFitStatusText(const String& text) {
 static int scannerCountActiveChannels(const uint8_t* vals, int count) {
   int active = 0;
   for (int i = 0; i < count; i++) {
-    if (vals[i] >= 3) {
+    if (vals[i] > 0) {
       active++;
     }
   }
@@ -4680,9 +4511,8 @@ static void scannerDrawStaticStatusLines() {
     return;
   }
   char rangeLine[40];
-  snprintf(rangeLine, sizeof(rangeLine), "Range: 2.400-2.525 GHz  %d ch", (int)N);
+  snprintf(rangeLine, sizeof(rangeLine), "2400-%d MHz | %d channels", 2400 + (int)N - 1, (int)N);
   scannerDrawStatusLineIfChanged(4, rangeLine, UI_DIM_TEXT);
-  scannerDrawStatusLineIfChanged(5, "State: Monitoring", UI_DIM_TEXT);
   s_statusStaticDrawn = true;
 }
 
@@ -4692,7 +4522,7 @@ static void scannerUpdateStatusPanel(const uint8_t* vals, int count) {
   scannerFindPeak(vals, count, peakCh, peakVal);
   const int active = scannerCountActiveChannels(vals, count);
 
-  const int pct = peakVal > 0 ? min(100, ((int)peakVal * 100) / 64) : 0;
+  const int pct = peakVal;
   const int pctBucket = pct / 3;
   const uint32_t now = millis();
   if (peakCh == s_statusPeakCh && pctBucket == s_statusPctBucket &&
@@ -4710,14 +4540,14 @@ static void scannerUpdateStatusPanel(const uint8_t* vals, int count) {
   if (peakVal == 0) {
     scannerDrawStatusLineIfChanged(0, "Peak: none", UI_DIM_TEXT);
     scannerDrawStatusLineIfChanged(1, "Ch --  --", UI_DIM_TEXT);
-    scannerDrawStatusLineIfChanged(2, "Strength: 0%", UI_DIM_TEXT);
+    scannerDrawStatusLineIfChanged(2, s_noiseCalibrated ? "Above baseline: 0 pp" : "Occupancy: 0%", UI_DIM_TEXT);
   } else {
     scannerDrawStatusLineIfChanged(0, "Peak: " + scannerChannelGHzText(peakCh) + " GHz", UI_TEXT);
     scannerDrawStatusLineIfChanged(1, scannerChannelBandLine(peakCh), UI_TEXT);
-    scannerDrawStatusLineIfChanged(2, "Strength: " + String(pct) + "%", UI_TEXT);
+    scannerDrawStatusLineIfChanged(2, (s_noiseCalibrated ? "Above baseline: " : "Occupancy: ") + String(pct) + (s_noiseCalibrated ? " pp" : "%"), UI_TEXT);
   }
 
-  scannerDrawStatusLineIfChanged(3, "Active: " + String(active) + " channel(s)", active > 0 ? UI_OK : UI_DIM_TEXT);
+  scannerDrawStatusLineIfChanged(3, "Detected: " + String(active) + " / " + String(count) + " channels", active > 0 ? UI_OK : UI_DIM_TEXT);
 }
 
 static void scannerClearPeakMarker() {
@@ -4770,35 +4600,10 @@ static void scannerUpdateBarColumn(int ch, int newPx, int oldPx) {
   s_prevBarPx[ch] = (uint8_t)newPx;
 }
 
-static void scannerSmoothFrame(const uint8_t* frameHits, int count) {
-  for (int i = 0; i < count; i++) {
-    if (frameHits[i] > 0) {
-      int blended = (((int)s_smoothValues[i] * 3) + ((int)frameHits[i] * 5)) / 8;
-      if (blended < (int)frameHits[i]) {
-        blended = frameHits[i];
-      }
-      s_smoothValues[i] = (uint8_t)min(255, blended);
-    } else if (s_smoothValues[i] > 2) {
-      s_smoothValues[i] = (uint8_t)(((int)s_smoothValues[i] * 7) / 8);
-    } else if (s_smoothValues[i] > 0) {
-      s_smoothValues[i]--;
-    }
-  }
-}
-
-static int scannerValueToBarPx(uint8_t val, uint8_t peakVal) {
-  if (val == 0 || !s_plot.valid || s_plot.maxBarHeight <= 0) {
-    return 0;
-  }
-
-  const int maxH = s_plot.maxBarHeight;
-  if (peakVal == 0 || val >= peakVal) {
-    return min(maxH, max(kScannerMinBarPx, (int)val));
-  }
-
-  const int span = maxH - kScannerMinBarPx;
-  int scaled = kScannerMinBarPx + (span * (int)val) / (int)peakVal;
-  return min(maxH, max(kScannerMinBarPx, scaled));
+static int scannerValueToBarPx(uint8_t val, uint8_t /*peakVal*/) {
+  if (!s_plot.valid || s_plot.maxBarHeight <= 0) return 0;
+  // A fixed percentage axis makes adjacent channels and frames comparable.
+  return (min(100, (int)val) * s_plot.maxBarHeight) / 100;
 }
 
 static void scannerUpdateBars(const uint8_t* vals, int count) {
@@ -4822,61 +4627,49 @@ static void scannerUpdateBars(const uint8_t* vals, int count) {
   }
 }
 
+static void scannerInvalidatePlot() {
+  s_graphChromeDrawn = false;
+  s_lastStatusDrawMs = 0;
+  s_statusPeakCh = -1;
+}
+
+static void scannerPresentSamples(const uint16_t* hits, uint16_t samples) {
+  for (int ch = 0; ch < N; ++ch) {
+    const uint8_t percent = RfOccupancy::percent(hits[ch], samples);
+    values[ch] = s_noiseCalibrated
+        ? RfOccupancy::aboveBaseline(percent, backgroundNoise[ch]) : percent;
+  }
+  scannerUpdateBars(values, N);
+  scannerUpdatePeakMarker(values, N);
+  scannerUpdateStatusPanel(values, N);
+}
+
+static void scannerResetMeasurements() {
+  s_noiseCalibrated = false;
+  memset(backgroundNoise, 0, sizeof(backgroundNoise));
+  scannerResetGraphState();
+  scannerDrawGraphChrome();
+  scannerUpdateStatusPanel(values, N);
+  Print("Reset; raw RPD occupancy", UI_DIM_TEXT);
+}
+
 void display() {
-  if (!scanning) {
-    return;
+  if (!scanning || s_paused) return;
+  uint16_t hits[CHANNELS];
+  if (scannerCollectSamples(DISPLAY_SWEEPS, hits)) {
+    scannerPresentSamples(hits, DISPLAY_SWEEPS);
   }
-
-  uint8_t frameHits[N];
-  memset(frameHits, 0, sizeof(frameHits));
-
-  disable();
-  static uint32_t lastNavPoll = 0;
-  for (int pass = 0; pass < (int)DISPLAY_SWEEPS && scanning; ++pass) {
-    for (int i = 0; i < N && scanning; ++i) {
-      if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
-        scanning = false;
-        Print("Display interrupted by user", UI_WARN, true);
-        return;
-      }
-      if (feature_exit_requested || featureExitButtonPressed()) {
-        return;
-      }
-
-      setRegister(_NRF24_RF_CH, (uint8_t)i);
-      enable();
-      delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
-      disable();
-      if (carrierDetected()) {
-        frameHits[i]++;
-      }
-
-      const uint32_t now = millis();
-      if (now - lastNavPoll >= UI_THROTTLE_MS) {
-        scannerPollNavButtons();
-        lastNavPoll = now;
-      } else if ((i % BUTTON_POLL_STRIDE) == 0) {
-        scannerPollNavButtons();
-      }
-    }
-  }
-
-  scannerSmoothFrame(frameHits, N);
-  // Suppress channels still at/below the calibrated noise floor so persistent
-  // background interference (WiFi etc.) stops painting permanent bars.
-  if (s_noiseCalibrated) {
-    for (int i = 0; i < N; i++) {
-      const int h = (int)s_smoothValues[i] - backgroundNoise[i];
-      s_smoothValues[i] = h > 0 ? (uint8_t)h : 0;
-    }
-  }
-  scannerUpdateBars(s_smoothValues, N);
-  scannerUpdatePeakMarker(s_smoothValues, N);
-  scannerUpdateStatusPanel(s_smoothValues, N);
 }
 
 void scannerSetup() {
   setTouchButtonInputEnabled(true);
+  s_paused = false;
+  s_pendingAction = ACTION_NONE;
+  s_cancelMeasurement = false;
+  s_scannerLastBtnMs = 0;
+  Index = 3;
+  Buffer[3] = Buffer[4] = "";
+  Buffercolor[3] = Buffercolor[4] = UI_DIM_TEXT;
   bleSetScannerNavLabels();
   bleClearBody(TFT_BLACK);
 
@@ -4895,7 +4688,7 @@ void scannerSetup() {
   scannerDrawTextBoxes();
   scannerDrawStatusLineIfChanged(0, "Peak: scanning...", UI_DIM_TEXT);
   scannerDrawStatusLineIfChanged(1, "Ch --  --", UI_DIM_TEXT);
-  scannerDrawStatusLineIfChanged(2, "Strength: --", UI_DIM_TEXT);
+  scannerDrawStatusLineIfChanged(2, "Occupancy: --", UI_DIM_TEXT);
   scannerDrawStatusLineIfChanged(3, "Active: 0 channel(s)", UI_DIM_TEXT);
   scannerDrawStaticStatusLines();
   Print("[+] Scanner ready", UI_WARN, false);
@@ -4915,26 +4708,28 @@ void scannerSetup() {
   setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) | 0x03);
   delayMicroseconds(130);
   setRegister(_NRF24_EN_AA, 0x0);
-  setRegister(_NRF24_RF_SETUP, 0x0F);
+  setRegister(_NRF24_RF_SETUP, 0x06);  // 1 Mbps receive; carrier mode disabled.
 
   scanning = true;
 }
 
 void scannerLoop() {
-  scanning = true;
-  while (scanning) {
-
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
-      feature_exit_requested = true;
-      scanning = false;
-      break;
-    }
-
-    scannerPollNavButtons();
-    runUI();
-    display();  // sweeps RPD per channel, updates bars + status
-    delay(2);
+  if (!scanning || feature_exit_requested) return;
+  scannerPollNavButtons();
+  runUI();
+  if (feature_exit_requested) return;
+  const ScannerAction action = s_pendingAction;
+  s_pendingAction = ACTION_NONE;
+  switch (action) {
+    case ACTION_CALIBRATE: calibrateBackgroundNoise(); break;
+    case ACTION_SAMPLE: scan(); break;
+    case ACTION_RESET: scannerResetMeasurements(); break;
+    default: display(); break;
   }
+  scannerDrawStatusLineIfChanged(5, s_paused ? "HOLD | Sample takes a fresh reading" :
+                                 "LIVE | receive only", UI_DIM_TEXT);
+  updateStatusBar();
+  delay(2);
 }
 
 void exit() {

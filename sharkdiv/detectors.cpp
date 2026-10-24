@@ -2,6 +2,9 @@
 // passive BLE observer scan + WiFi async scan (+ OUI from BSSIDs), hits
 // scored by matched evidence, RSSI meter + locate view per target.
 #include "detectors.h"
+#include "RemoteIdParser.h"
+#include "BleHostOperation.h"
+#include <esp_netif.h>
 #include "icon.h"
 #include "config.h"
 #include "utils.h"
@@ -70,7 +73,7 @@ static const Sig kSigs[] = {
   { "LE Gear", "law enforcement",
     {}, {}, {}, {}, {} },          // OUI list from SD (gear-ouis.txt)
   { "Drone RemoteID", "drone",
-    {}, {}, {0x0060}, {}, {} },    // asdot interop co-id + WiFi VSE at runtime
+    {}, {}, {}, {}, {} },       // Dedicated validated Remote ID receiver below.
   { "Device Scout", "device",
     {nullptr}, {}, {}, {}, {} },   // ranks ALL BLE devices by persistence
 };
@@ -185,11 +188,6 @@ static bool bleMatch(const Sig& s, NimBLEAdvertisedDevice* d, const char** outNa
         *outName = "iBeacon";
         return true;
       }
-      // ASTM RemoteID interop: company 0x0060 (asdot)
-      if (co == 0x0060 && !strcmp(s.detName, "Drone RemoteID")) {
-        *outName = "RemoteID";
-        return true;
-      }
     }
   }
   return false;
@@ -213,32 +211,6 @@ class DetCb : public BLEAdvertisedDeviceCallbacks {
   }
 };
 static DetCb s_cb;
-
-// WiFi VSE sniff for DroneID (beacons carrying ASTM RemoteID)
-static void IRAM_ATTR wifiCb(void* buf, wifi_promiscuous_pkt_type_t type) {
-  if (type != WIFI_PKT_MGMT || !s_active) return;
-  const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
-  const uint8_t* f = pkt->payload;
-  if ((f[0] & 0x0F) != 0x00 || ((f[0] & 0xF0) >> 4) != 0x08) return; // beacon
-  const int len = pkt->rx_ctrl.sig_len;
-  // walk tagged params looking for vendor-specific 0xDD with drone co-ids
-  int i = 36;
-  while (i + 2 < len) {
-    const uint8_t id = f[i], l = f[i + 1];
-    if (id == 0xDD && l >= 4) {
-      const uint16_t co = f[i + 2] | (f[i + 3] << 8);
-      if (co == 0x0060 || co == 0x0016 || co == 0x0017) {
-        char mac[18];
-        const uint8_t* b = f + 16;
-        snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-                 b[0], b[1], b[2], b[3], b[4], b[5]);
-        upsert("DroneID beacon", mac, (int8_t)pkt->rx_ctrl.rssi, 3);
-      }
-    }
-    i += 2 + l;
-    if (l == 0) break;
-  }
-}
 
 static bool ouiInList(const char* mac, const char list[][10], int n) {
   char buf[9];
@@ -396,20 +368,332 @@ static void paintHits(int cursor, bool locateMode) {
   }
 }
 
+// Remote ID gets its own bounded table: arbitrary manufacturers and SSIDs
+// never count as drones. Callback tasks only decode and copy; UI draws snapshots.
+struct RidHit {
+  uint8_t mac[6];
+  uint8_t channel;  // 0 = BLE, otherwise 2.4 GHz Wi-Fi channel.
+  int8_t rssi;
+  RemoteId::Observation value;
+  uint32_t seenMs, idMs, locationMs;
+};
+static constexpr int kRidMax = 12;
+static RidHit s_ridHits[kRidMax];
+static int s_ridCount = 0;
+static bool s_ridReceiving = false;  // Always accessed under s_ridLock.
+static portMUX_TYPE s_ridLock = portMUX_INITIALIZER_UNLOCKED;
+
+static void ridRecord(const uint8_t* mac, uint8_t channel, int8_t rssi,
+                      const RemoteId::Observation& value) {
+  portENTER_CRITICAL(&s_ridLock);
+  if (!s_ridReceiving) { portEXIT_CRITICAL(&s_ridLock); return; }
+  const uint32_t now = millis();
+  int slot = -1;
+  for (int i = 0; i < s_ridCount; ++i) {
+    if (!memcmp(s_ridHits[i].mac, mac, 6) &&
+        (s_ridHits[i].channel == 0) == (channel == 0)) { slot = i; break; }
+  }
+  if (slot < 0) {
+    if (s_ridCount < kRidMax) slot = s_ridCount++;
+    else {
+      slot = 0;
+      for (int i = 1; i < kRidMax; ++i)
+        if (now - s_ridHits[i].seenMs > now - s_ridHits[slot].seenMs) slot = i;
+    }
+    s_ridHits[slot] = RidHit{};
+    memcpy(s_ridHits[slot].mac, mac, 6);
+  }
+  RidHit& hit = s_ridHits[slot];
+  hit.channel = channel;
+  hit.rssi = rssi;
+  hit.seenMs = now;
+  hit.value.version = value.version;
+  if (value.hasId) {
+    hit.value.hasId = true;
+    hit.value.idType = value.idType;
+    hit.value.aircraftType = value.aircraftType;
+    memcpy(hit.value.id, value.id, sizeof(value.id));
+    hit.idMs = now;
+  }
+  if (value.hasLocation) {
+    hit.value.hasLocation = true;
+    hit.value.positionValid = value.positionValid;
+    hit.value.altitudeValid = value.altitudeValid;
+    hit.value.speedValid = value.speedValid;
+    hit.value.status = value.status;
+    hit.value.latitude = value.latitude;
+    hit.value.longitude = value.longitude;
+    hit.value.altitude = value.altitude;
+    hit.value.speed = value.speed;
+    hit.locationMs = now;
+  }
+  portEXIT_CRITICAL(&s_ridLock);
+}
+
+class RidCallbacks : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice* device) override {
+    if (!device) return;
+    RemoteId::Observation value;
+    if (!RemoteId::parseBleAdvertisement(device->getPayload(),
+                                         device->getPayloadLength(), value)) return;
+    unsigned int b[6];
+    const std::string address = device->getAddress().toString();
+    if (sscanf(address.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x",
+               &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) return;
+    uint8_t mac[6];
+    for (int i = 0; i < 6; ++i) mac[i] = static_cast<uint8_t>(b[i]);
+    ridRecord(mac, 0, device->getRSSI(), value);
+  }
+};
+static RidCallbacks s_ridCallbacks;
+
+static void ridWifiCallback(void* buffer, wifi_promiscuous_pkt_type_t type) {
+  if (!buffer || type != WIFI_PKT_MGMT) return;
+  const wifi_promiscuous_pkt_t* packet =
+      static_cast<const wifi_promiscuous_pkt_t*>(buffer);
+  // ESP-IDF sig_len includes the four-byte FCS. It is not an information element.
+  const size_t length = packet->rx_ctrl.sig_len;
+  if (length < 40) return;
+  RemoteId::Observation value;
+  if (RemoteId::parseWifiBeacon(packet->payload, length - 4, value))
+    ridRecord(packet->payload + 10, packet->rx_ctrl.channel,
+              packet->rx_ctrl.rssi, value);
+}
+
+static bool ridStartWifi() {
+  wifi_mode_t previous;
+  const esp_err_t state = esp_wifi_get_mode(&previous);
+  if (state == ESP_ERR_WIFI_NOT_INIT) {
+    // WIFI_MODE_NULL supplies the monitor radio without an AP or station that
+    // could associate, beacon, or send probe requests.
+    esp_netif_init();
+    esp_event_loop_create_default();
+    wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
+    if (esp_wifi_init(&config) != ESP_OK) return false;
+  } else if (state != ESP_OK) return false;
+  esp_wifi_scan_stop();
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_stop();
+  if (esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK ||
+      esp_wifi_set_mode(WIFI_MODE_NULL) != ESP_OK ||
+      esp_wifi_start() != ESP_OK) return false;
+  wifi_promiscuous_filter_t filter = {};
+  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
+  return esp_wifi_set_promiscuous_filter(&filter) == ESP_OK &&
+         esp_wifi_set_promiscuous_rx_cb(&ridWifiCallback) == ESP_OK &&
+         esp_wifi_set_promiscuous(true) == ESP_OK &&
+         esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE) == ESP_OK;
+}
+
+static int ridSnapshot(RidHit* out) {
+  portENTER_CRITICAL(&s_ridLock);
+  const uint32_t now = millis();
+  int count = 0;
+  for (int i = 0; i < s_ridCount; ++i) {
+    if (now - s_ridHits[i].seenMs <= 30000) {
+      RidHit& hit = s_ridHits[i];
+      if (now - hit.idMs > 30000) hit.value.hasId = false;
+      if (now - hit.locationMs > 10000) hit.value.hasLocation = false;
+      s_ridHits[count++] = hit;
+    }
+  }
+  s_ridCount = count;
+  memcpy(out, s_ridHits, count * sizeof(RidHit));
+  portEXIT_CRITICAL(&s_ridLock);
+  return count;
+}
+
+static const char* ridStatus(uint8_t status) {
+  switch (status) {
+    case 1: return "GROUND";
+    case 2: return "AIRBORNE";
+    case 3: return "EMERGENCY";
+    case 4: return "RID FAULT";
+    default: return "UNDECLARED";
+  }
+}
+
+static void ridPaint(int& cursor, bool details, bool wifiOk, bool bleOk,
+                     uint8_t channel) {
+  RidHit hits[kRidMax];
+  const int count = ridSnapshot(hits);
+  if (cursor >= count) cursor = 0;
+  const int bottom = touchNavContentBottomY() > 0 ? touchNavContentBottomY()
+                                                 : tft.height() - 60;
+  tft.fillRect(0, 46, tft.width(), bottom - 46, TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  char text[64];
+  snprintf(text, sizeof(text), "RX  BLE:%s  WiFi:%s  CH %02u",
+           bleOk ? "ON" : "ERR", wifiOk ? "ON" : "ERR", channel);
+  tft.drawString(text, 8, 50, 1);
+  snprintf(text, sizeof(text), "%u broadcasts  /  %s", count, details ? "DETAIL" : "LIST");
+  tft.drawString(text, 8, 66, 1);
+  tft.drawFastHLine(8, 80, tft.width() - 16, UI_LINE);
+  if (!count) {
+    tft.setTextColor(UI_TEXT, TFT_BLACK);
+    tft.drawString("Listening for Remote ID", 8, 99, 2);
+    tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+    tft.drawString("BLE legacy + WiFi beacons", 8, 124, 1);
+    tft.drawString("2.4 GHz channels 1-11", 8, 140, 1);
+    tft.drawString("No signal is not proof of no drone.", 8, 164, 1);
+  } else if (!details) {
+    const int page = cursor / 4;
+    for (int i = page * 4; i < count && i < (page + 1) * 4; ++i) {
+      const int y = 88 + (i % 4) * 35;
+      tft.setTextColor(i == cursor ? UI_ICON : UI_TEXT, TFT_BLACK);
+      snprintf(text, sizeof(text), "%c %.20s", i == cursor ? '>' : ' ',
+               hits[i].value.hasId ? hits[i].value.id : "Awaiting Basic ID");
+      tft.drawString(text, 8, y, 1);
+      snprintf(text, sizeof(text), "  %s  %d dBm  %lus ago",
+               hits[i].channel ? "WIFI" : "BLE", hits[i].rssi,
+               static_cast<unsigned long>((millis() - hits[i].seenMs) / 1000));
+      tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+      tft.drawString(text, 8, y + 14, 1);
+    }
+  } else {
+    const RidHit& hit = hits[cursor];
+    const RemoteId::Observation& value = hit.value;
+    snprintf(text, sizeof(text), "%u/%u  %s  %d dBm  v%u", cursor + 1, count,
+             hit.channel ? "WIFI" : "BLE", hit.rssi, value.version);
+    tft.setTextColor(UI_ICON, TFT_BLACK);
+    tft.drawString(text, 8, 88, 1);
+    tft.setTextColor(UI_TEXT, TFT_BLACK);
+    snprintf(text, sizeof(text), "%.20s", value.hasId ? value.id : "Awaiting Basic ID");
+    tft.drawString(text, 8, 104, 1);
+    if (value.hasId && strlen(value.id) > 20)
+      tft.drawString(value.id + 20, 8, 116, 1);
+    snprintf(text, sizeof(text), "%02X:%02X:%02X:%02X:%02X:%02X  %lus",
+             hit.mac[0], hit.mac[1], hit.mac[2], hit.mac[3], hit.mac[4], hit.mac[5],
+             static_cast<unsigned long>((millis() - hit.seenMs) / 1000));
+    tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+    tft.drawString(text, 8, 132, 1);
+    if (value.hasLocation) {
+      if (value.positionValid) {
+        snprintf(text, sizeof(text), "LAT  %.6f", value.latitude);
+        tft.drawString(text, 8, 150, 1);
+        snprintf(text, sizeof(text), "LON  %.6f", value.longitude);
+        tft.drawString(text, 8, 166, 1);
+      } else tft.drawString("Position not broadcast", 8, 150, 1);
+      if (value.altitudeValid) snprintf(text, sizeof(text), "ALT  %.1f m WGS84", value.altitude);
+      else snprintf(text, sizeof(text), "ALT  unavailable");
+      tft.drawString(text, 8, 182, 1);
+      if (value.speedValid) snprintf(text, sizeof(text), "SPD  %.2f m/s", value.speed);
+      else snprintf(text, sizeof(text), "SPD  unavailable");
+      tft.drawString(text, 8, 198, 1);
+      snprintf(text, sizeof(text), "%s  LOC %lus old", ridStatus(value.status),
+               static_cast<unsigned long>((millis() - hit.locationMs) / 1000));
+      tft.drawString(text, 8, 216, 1);
+    } else tft.drawString("Location pending / expired", 8, 150, 1);
+  }
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("Broadcast data / unverified", 8, bottom - 14, 1);
+}
+
+static void runRemoteId() {
+  pauseBackgroundRadioTasks();
+  s_active = nullptr;
+  portENTER_CRITICAL(&s_ridLock);
+  s_ridCount = 0;
+  s_ridReceiving = true;
+  portEXIT_CRITICAL(&s_ridLock);
+  chrome("REMOTE ID", nullptr);
+  setTouchNavLabels("Prev", "Clear", "Exit", "View", "Next");
+  redrawTouchButtonBar();
+  const bool wifiOk = ridStartWifi();
+  const bool bleReady = ensureBleStackReady();
+  struct ScanStart {
+    BLEScan* scan;
+    bool configured;
+    bool started;
+  } start = {nullptr, false, false};
+  const bool bleScheduled = bleReady && runBleHostOperation([](void* context) {
+    ScanStart& request = *static_cast<ScanStart*>(context);
+    request.scan = BLEDevice::getScan();
+    // A failed cancellation can leave the controller scanning. Do not replace
+    // its callbacks or clear results until cancellation actually succeeds.
+    if (!request.scan || !request.scan->stop()) return;
+    BLEDevice::getAdvertising()->stop();
+    request.scan->clearResults();
+    request.scan->setAdvertisedDeviceCallbacks(&s_ridCallbacks, true);
+    request.scan->setActiveScan(false);
+    request.scan->setInterval(160);
+    request.scan->setWindow(80);
+    request.scan->setDuplicateFilter(false); // Receive refreshed Location.
+    request.scan->setMaxResults(0);          // Callback-only bounded storage.
+    request.configured = true;
+    request.started = request.scan->start(0, nullptr, false);
+  }, &start);
+  const bool bleOk = bleScheduled && start.started;
+  if (!bleOk) Serial.println("[RemoteID] BLE unavailable or scan cancellation/start failed");
+  int cursor = 0;
+  bool details = true;
+  uint8_t channel = 6;
+  uint32_t lastHop = millis(), lastPaint = 0;
+  while (!feature_exit_requested) {
+    if (featureExitButtonPressed()) break;
+    if (isButtonPressedEdge(BTN_LEFT)) {
+      cursor = cursor ? cursor - 1 : 0;
+    } else if (isButtonPressedEdge(BTN_RIGHT)) {
+      cursor++;
+    } else if (isButtonPressedEdge(BTN_UP)) {
+      details = !details;
+    } else if (isButtonPressedEdge(BTN_DOWN)) {
+      portENTER_CRITICAL(&s_ridLock);
+      s_ridCount = 0;
+      portEXIT_CRITICAL(&s_ridLock);
+      cursor = 0;
+    }
+    const uint32_t now = millis();
+    if (wifiOk && now - lastHop >= 300) {
+      lastHop = now;
+      channel = channel % 11 + 1;
+      esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    }
+    if (now - lastPaint >= 350) {
+      lastPaint = now;
+      ridPaint(cursor, details, wifiOk, bleOk, channel);
+    }
+    delay(20);
+  }
+  portENTER_CRITICAL(&s_ridLock);
+  s_ridReceiving = false;
+  portEXIT_CRITICAL(&s_ridLock);
+  if (start.configured) {
+    struct ScanStop { BLEScan* scan; bool stopped; } stop = {start.scan, false};
+    const bool executed = runBleHostOperation([](void* context) {
+      ScanStop& request = *static_cast<ScanStop*>(context);
+      if (!request.scan->stop()) return;
+      request.scan->setAdvertisedDeviceCallbacks(nullptr);
+      request.scan->clearResults();
+      request.scan->setMaxResults(0xff); // NimBLE 1.4 default only after stop.
+      request.stopped = true;
+    }, &stop);
+    if (!executed || !stop.stopped) {
+      // The static callback remains valid and writes are disabled above. Keep
+      // maxResults(0) so a failed stop cannot grow the library's result vector.
+      Serial.println("[RemoteID] BLE stop failed; bounded scan retained, restart recommended");
+    }
+  }
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(nullptr);
+  esp_wifi_stop();
+}
+
 static void runDetector(int sigIdx) {
   const Sig& s = kSigs[sigIdx];
+  if (!strcmp(s.detName, "Drone RemoteID")) { runRemoteId(); return; }
   s_active = &s;
   s_hitCount = 0;
   chrome(s.detName, kSigChips[sigIdx]);
 
   bool wifiEver = s.wifiSsids[0] || s.wifiOuis[0] ||
                   !strcmp(s.detName, "WiFi Cameras") || !strcmp(s.detName, "LE Gear");
-  bool wifiDrone = !strcmp(s.detName, "Drone RemoteID");
 
   pauseBackgroundRadioTasks();
 
   // BLE observer window (unless detector is WiFi-only)
-  const bool useBle = !wifiEver || wifiDrone || true;  // most detectors listen both
+  const bool useBle = true;  // Existing signature detectors observe BLE.
   if (useBle) {
     ensureBleStackReady();
     BLEScan* scan = BLEDevice::getScan();
@@ -426,12 +710,6 @@ static void runDetector(int sigIdx) {
   uint32_t lastScan = 0;
   uint32_t lastPaint = 0;
 
-  if (wifiDrone) {
-    esp_wifi_set_promiscuous(false);
-    esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_set_promiscuous_rx_cb(&wifiCb);
-    esp_wifi_set_promiscuous(true);
-  }
 
   for (;;) {
     if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
@@ -468,7 +746,6 @@ static void runDetector(int sigIdx) {
   }
 
   if (useBle) BLEDevice::getScan()->stop();
-  if (wifiDrone) esp_wifi_set_promiscuous(false);
   s_active = nullptr;
 }
 

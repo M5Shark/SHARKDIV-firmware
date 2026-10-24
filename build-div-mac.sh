@@ -37,4 +37,5 @@ EXTRA_LIBS="${ESP32DIV_LIBS:-$HERE/libs}"
   "$SKETCH"
 
 echo
-echo "Done: $HERE/build/sharkdiv.ino.bin (flash at 0x0 with esptool)"
+echo "Done: $HERE/build/sharkdiv.ino.bin (application only, offset 0x10000)"
+echo "Use arduino-cli upload for the complete build; only a merged image belongs at 0x0."
