@@ -20,6 +20,7 @@
 #include "SharkGamesDiv.h"
 #include "UserApps.h"
 #include "flock_menu.h"
+#include "detectors.h"
 #include "SharkExtra.h"
 #include "ducky.h"
 #include "icon.h"
@@ -184,12 +185,13 @@ static constexpr uint8_t OTHER_LAYER_IR   = 1;
 static constexpr uint8_t OTHER_LAYER_RFID = 2;
 static constexpr uint8_t OTHER_LAYER_GPS  = 3;
 
-const int other_NUM_SUBMENU_ITEMS = 4;
+const int other_NUM_SUBMENU_ITEMS = 5;
 static constexpr int OTHER_GRID_COLS = 2;
 const char *other_submenu_items[other_NUM_SUBMENU_ITEMS] = {
     "IR Remote",
     "RFID/NFC",
     "GPS",
+    "Detectors",
     "Main Menu"};
 
 const int rfid_NUM_SUBMENU_ITEMS = 9;
@@ -328,6 +330,7 @@ const unsigned char *other_submenu_icons[other_NUM_SUBMENU_ITEMS] = {
     bitmap_icon_led,
     bitmap_icon_rfid_chip,
     bitmap_icon_satellite,
+    bitmap_icon_analyzer,
     bitmap_icon_go_back
 };
 
@@ -4390,7 +4393,17 @@ void handleOtherSubmenuButtons() {
         delay(200);
 
         if (other_layer == OTHER_LAYER_HOME) {
-            if (current_submenu_index == other_NUM_SUBMENU_ITEMS - 1) {
+            if (current_submenu_index == 3) {
+                feature_active = true;
+                feature_exit_requested = false;
+                setTouchButtonInputEnabled(true);
+                Detectors::runLauncher();
+                feature_active = false;
+                feature_exit_requested = false;
+                submenu_initialized = false;
+                displaySubmenu();
+                delay(200);
+            } else if (current_submenu_index == other_NUM_SUBMENU_ITEMS - 1) {
                 in_sub_menu = false;
                 feature_active = false;
                 feature_exit_requested = false;
@@ -4678,7 +4691,17 @@ void handleOtherSubmenuButtons() {
         delay(200);
 
         if (other_layer == OTHER_LAYER_HOME) {
-            if (current_submenu_index == other_NUM_SUBMENU_ITEMS - 1) {
+            if (current_submenu_index == 3) {
+                feature_active = true;
+                feature_exit_requested = false;
+                setTouchButtonInputEnabled(true);
+                Detectors::runLauncher();
+                feature_active = false;
+                feature_exit_requested = false;
+                submenu_initialized = false;
+                displaySubmenu();
+                delay(200);
+            } else if (current_submenu_index == other_NUM_SUBMENU_ITEMS - 1) {
                 in_sub_menu = false;
                 feature_active = false;
                 feature_exit_requested = false;
