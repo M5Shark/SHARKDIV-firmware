@@ -14,6 +14,7 @@ struct AppSettings {
   uint8_t  accentColor = 0;
 
   bool     neopixelEnabled = false;
+  bool     detectionSound = true;
 
   bool     autoWifiScan    = true;
   bool     autoBleScan     = true;
@@ -39,5 +40,8 @@ const char* accentPresetName(uint8_t preset);
 
 const char* settingsBoardProfileId();
 void settingsApplyBoardTouchDefaults();
+// Sound is also stored in NVS, so mute survives without an SD card.
+bool settingsSetDetectionSound(bool enabled);
+void settingsLoadSound();
 bool settingsLoad();
 bool settingsSave();

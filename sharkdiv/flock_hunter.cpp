@@ -1,9 +1,11 @@
 // Passive Flock candidate receiver. Published evidence is not camera identity.
+#include "DetectionAlerts.h"
 #include "flock_hunter.h"
 #include "config.h"
 #include "Touchscreen.h"
 #include "utils.h"
 #include <WiFi.h>
+#include <Preferences.h>
 #include "esp_wifi.h"
 
 namespace FlockHunter {
@@ -13,6 +15,7 @@ static uint8_t s_detCount = 0;
 static uint32_t s_probeCount = 0;
 static uint32_t s_matchCount = 0;
 static bool s_accept = false;
+static bool s_matchSound = true;
 static bool s_ready = false;
 static bool s_dirty = true;
 static uint8_t s_chanIdx = 0;
@@ -50,7 +53,10 @@ static void recordHit(const uint8_t* mac, int8_t rssi, uint8_t channel,
   hit.fingerprint |= evidence.fingerprint;
   if (hit.count != UINT16_MAX) ++hit.count;
   s_dirty = true;
+  const bool sound = s_matchSound;
   portEXIT_CRITICAL(&s_mux);
+  if (sound) DetectionAlerts::notify(DetectionAlerts::Source::Flock,
+                                     DetectionAlerts::hash(mac, 6));
 }
 
 static void promiscCb(void* buf, wifi_promiscuous_pkt_type_t type) {
@@ -150,7 +156,11 @@ void flockSetup() {
   setTouchButtonInputEnabled(true);
   setTouchNavLabels(nullptr, nullptr, "Exit", nullptr, nullptr);
   flockStop();
+  Preferences prefs;
+  bool matchSound = true;
+  if (prefs.begin("flock", true)) { matchSound = prefs.getBool("snd", true); prefs.end(); }
   portENTER_CRITICAL(&s_mux);
+  s_matchSound = matchSound;
   s_detCount = 0;
   s_probeCount = 0;
   s_matchCount = 0;

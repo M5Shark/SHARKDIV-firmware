@@ -1,3 +1,4 @@
+#include "DetectionAlerts.h"
 #include "SettingsStore.h"
 #include "FindMyScanner.h"
 #include "RfOccupancy.h"
@@ -1979,12 +1980,18 @@ class AdvCallbacks : public BLEAdvertisedDeviceCallbacks {
 
     const int8_t rssi = (int8_t)device->getRSSI();
 
+    bool accepted = false;
     portENTER_CRITICAL(&s_mux);
     if (s_acceptResults) {
       s_candidates.observe(mac, rssi, status, millis());
       s_hasUpdates = true;
+      accepted = true;
     }
     portEXIT_CRITICAL(&s_mux);
+    if (accepted) {
+      DetectionAlerts::notify(DetectionAlerts::Source::FindMy,
+                             DetectionAlerts::hash(mac, sizeof(mac)));
+    }
   }
 };
 
@@ -2777,6 +2784,8 @@ class AdvCallbacks : public BLEAdvertisedDeviceCallbacks {
       s_hasUpdates = true;
     }
     portEXIT_CRITICAL(&s_mux);
+    DetectionAlerts::notify(DetectionAlerts::Source::BLE,
+                           DetectionAlerts::hash(mac, sizeof(mac)));
   }
 };
 
@@ -3442,6 +3451,7 @@ static TaskHandle_t bgBleScanTaskHandle = nullptr;
 static StaticSemaphore_t bgBleScanMutexStorage;
 static SemaphoreHandle_t bgBleScanMutex = nullptr;
 static volatile bool bgHasResults = false;
+static volatile int bgLastCount = 0;
 static volatile uint32_t bgLastScanMs = 0;
 static volatile bool bgBleScanRunning = false;
 static volatile bool fgBleScanInProgress = false;
@@ -3457,13 +3467,45 @@ static void stopBgBleScanIfRunning() {
   bgBleScanRunning = false;
 }
 
-static void ensureBleInit() {
-  if (bleInitDone) return;
-  if (!ensureBleStackReady()) return;
+class ScanAlerts : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice* device) override {
+    if (!fgBleScanInProgress || !device) return;
+    const std::string address = device->getAddress().toString();
+    DetectionAlerts::notify(DetectionAlerts::Source::BLE,
+        DetectionAlerts::hash(reinterpret_cast<const uint8_t*>(address.data()), address.size()));
+  }
+};
+static ScanAlerts s_scanAlerts;
 
+static void invalidateBleCache() {
+  // NimBLEScanResults copies pointers, not devices. The next foreground tool
+  // can free the shared scanner's devices, so never retain this borrowed view.
+  bgHasResults = false;
+  bgLastCount = 0;
+  bleResults = BLEScanResults();
+}
+
+static bool ensureBleInit() {
+  if (!ensureBleStackReady()) return false;
   bleScan = BLEDevice::getScan();
-  bleScan->setActiveScan(true);
-  bleInitDone = true;
+  if (!bleScan) return false;
+  invalidateBleCache();
+  struct Command { BLEScan* scan; bool ready; } command = {bleScan, false};
+  const bool executed = runBleHostOperation([](void* context) {
+    Command& c = *static_cast<Command*>(context);
+    if (!c.scan->stop()) return;
+    c.scan->clearResults();
+    c.scan->setAdvertisedDeviceCallbacks(&s_scanAlerts, false);
+    c.scan->setMaxResults(64);
+    c.scan->setActiveScan(false);
+    c.scan->setInterval(100);
+    c.scan->setWindow(80);
+    c.scan->setDuplicateFilter(true);
+    c.ready = true;
+  }, &command);
+  bleInitDone = executed && command.ready;
+  if (!bleInitDone) Serial.println("[ble-scan] scanner setup failed");
+  return bleInitDone;
 }
 
 static void bgBleScanTask(void* ) {
@@ -3475,14 +3517,14 @@ static void bgBleScanTask(void* ) {
 
     const bool idleOk = (now - bgBootMs) > BG_BOOT_GRACE_MS;
     if (settings().autoBleScan && idleOk && !feature_active && !in_sub_menu) {
-      ensureBleInit();
-      if (!fgBleScanInProgress && bleInitDone && bleScan) {
+      if (!fgBleScanInProgress && ensureBleInit()) {
         bgBleScanRunning = true;
         isScanning = true;
         bleResults = bleScan->start(2, false);
         isScanning = false;
         bgBleScanRunning = false;
-        bgHasResults = (bleResults.getCount() > 0);
+        bgLastCount = bleResults.getCount();
+        bgHasResults = (bgLastCount > 0);
         bgLastScanMs = now;
         sleepMs = BG_BLE_SCAN_INTERVAL_MS;
       } else {
@@ -3499,11 +3541,11 @@ static void bgBleScanTask(void* ) {
 }
 
 void waitForBackgroundScanner() {
-  if (!bgBleScanMutex) return;
   // A synchronous two-second background scan owns its result storage until it
-  // returns. Let it finish before another feature changes the shared scanner.
-  xSemaphoreTake(bgBleScanMutex, portMAX_DELAY);
-  xSemaphoreGive(bgBleScanMutex);
+  // returns. Invalidate its borrowed pointers before the new owner can clear them.
+  if (bgBleScanMutex) xSemaphoreTake(bgBleScanMutex, portMAX_DELAY);
+  invalidateBleCache();
+  if (bgBleScanMutex) xSemaphoreGive(bgBleScanMutex);
 }
 
 void displayScanning() {
@@ -3542,7 +3584,12 @@ void startBLEScan() {
   isScanning = true;
   screenNeedsUpdate = true;
   fullScreenUpdate = true;
-  ensureBleInit();
+  if (!ensureBleInit()) {
+    isScanning = false;
+    screenNeedsUpdate = true;
+    showNotification("Bluetooth scan", "Scanner unavailable; reopen this tool.");
+    return;
+  }
   fgBleScanInProgress = true;
   bleResults = bleScan->start(5, false);
   fgBleScanInProgress = false;
@@ -3550,7 +3597,8 @@ void startBLEScan() {
   screenNeedsUpdate = true;
 
   if (bleResults.getCount() >= 0) {
-    bgHasResults = (bleResults.getCount() > 0);
+    bgLastCount = bleResults.getCount();
+    bgHasResults = (bgLastCount > 0);
     bgLastScanMs = millis();
   }
 }
@@ -3974,7 +4022,7 @@ void startBackgroundScanner() {
 int getLastCount() {
 
   if (!settings().autoBleScan) return 0;
-  return bleResults.getCount();
+  return bgLastCount;
 }
 
 void exit() {
@@ -4014,6 +4062,7 @@ static constexpr uint16_t BUTTON_POLL_STRIDE = 8;
 
 int backgroundNoise[CHANNELS] = {0};
 static bool s_noiseCalibrated = false;
+static bool s_activityAlerted = false;
 
 volatile bool scanning = true;
 static bool s_paused = false;
@@ -4651,6 +4700,14 @@ static void scannerPresentSamples(const uint16_t* hits, uint16_t samples) {
     values[ch] = s_noiseCalibrated
         ? RfOccupancy::aboveBaseline(percent, backgroundNoise[ch]) : percent;
   }
+  int peakChannel = 0;
+  uint8_t peakOccupancy = 0;
+  scannerFindPeak(values, N, peakChannel, peakOccupancy);
+  const bool activity = peakOccupancy >= 10;
+  if (activity && !s_activityAlerted) {
+    DetectionAlerts::notify(DetectionAlerts::Source::RF24, 2400u + peakChannel);
+  }
+  s_activityAlerted = activity;
   scannerUpdateBars(values, N);
   scannerUpdatePeakMarker(values, N);
   scannerUpdateStatusPanel(values, N);
@@ -4693,6 +4750,7 @@ void scannerSetup() {
   scannerResetGraphState();
   memset(backgroundNoise, 0, sizeof(backgroundNoise));
   s_noiseCalibrated = false;
+  s_activityAlerted = false;
   scannerDrawGraphChrome();
 
   setupTouchscreen();
@@ -5743,6 +5801,9 @@ static String esbAddrText(const uint8_t* a) {
 }
 
 static void esbOnPacket(uint8_t ch, const uint8_t* addr, const uint8_t* payload, int len) {
+  if (len > 0) {
+    DetectionAlerts::notify(DetectionAlerts::Source::RF24, DetectionAlerts::hash(addr, 5));
+  }
   s_packetTotal++;
   s_rateCount++;
 
@@ -9019,6 +9080,8 @@ private:
     auto& device = devices[deviceCount];
     device.isBLE = true;
     device.mac = bleDevice->getAddress().toString().c_str();
+    DetectionAlerts::notify(DetectionAlerts::Source::BLE,
+        DetectionAlerts::hash(reinterpret_cast<const uint8_t*>(device.mac.c_str()), device.mac.length()));
     device.rssi = bleDevice->getRSSI();
     device.deviceName = bleDevice->getName().c_str();
     device.serviceUUID = bleDevice->getServiceUUID().toString().c_str();
@@ -9434,6 +9497,7 @@ static constexpr uint16_t IF_NOISE_SWEEPS = 30;
 static int  s_hits[IF_N];
 static int  s_noise[IF_N];
 static bool s_noiseValid = false;
+static bool s_sourceActivity = false;
 static int  s_aPeakCh = -1, s_aPct = -1;
 static int  s_bPeakCh = -1, s_bPct = -1;
 static uint32_t s_lastBtnMs = 0;
@@ -9607,6 +9671,7 @@ void srcFinderSetup() {
   s_aPeakCh = s_bPeakCh = -1;
   s_aPct = s_bPct = -1;
   s_lastBtnMs = 0;
+  s_sourceActivity = false;
 
   SPI.begin(NRF24_SPI_SCK, NRF24_SPI_MISO, NRF24_SPI_MOSI, NRF24_SPI_SS);
   SPI.setDataMode(SPI_MODE0);
@@ -9651,6 +9716,16 @@ void srcFinderLoop() {
 
   measure(s_hits, IF_FRAME_SWEEPS);
   if (feature_exit_requested) return;
+
+  int activeChannel = -1;
+  for (int i = 0; i < IF_N; ++i) {
+    const int corrected = s_noiseValid ? s_hits[i] - s_noise[i] : s_hits[i];
+    if (corrected >= 2) { activeChannel = i; break; }
+  }
+  if (activeChannel >= 0 && !s_sourceActivity) {
+    DetectionAlerts::notify(DetectionAlerts::Source::RF24, 2400u + activeChannel);
+  }
+  s_sourceActivity = activeChannel >= 0;
 
   if (s_aPeakCh < 0) {
     s_aPeakCh = 0; s_aPct = 0;
@@ -9753,8 +9828,14 @@ class LtCallbacks : public BLEAdvertisedDeviceCallbacks {
         s_list[s_listCount].rssi = r;
         s_list[s_listCount].hits = 1;
         s_listCount++;
+        DetectionAlerts::notify(DetectionAlerts::Source::BLE,
+            DetectionAlerts::hash(reinterpret_cast<const uint8_t*>(a.c_str()), a.length()));
       }
     } else if (a == s_targetAddr) {
+      if (s_monCount == 0) {
+        DetectionAlerts::notify(DetectionAlerts::Source::BLE,
+            DetectionAlerts::hash(reinterpret_cast<const uint8_t*>(a.c_str()), a.length()));
+      }
       s_monCount++;
       s_monRssiSum += r;
       if (r < s_monRssiMin) s_monRssiMin = r;

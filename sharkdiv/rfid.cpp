@@ -1,3 +1,4 @@
+#include "DetectionAlerts.h"
 #include "rfid.h"
 
 #include <Adafruit_PN532.h>
@@ -1666,6 +1667,11 @@ static bool rfidListenIso14443a(const char* title, const char* footer, uint8_t* 
         return false;
       }
       if (s_nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, uidLenOut, 150)) {
+        // A physical tag was selected; writes/emulation never trigger this cue.
+        if (*uidLenOut == 4 || *uidLenOut == 7) {
+          DetectionAlerts::notify(DetectionAlerts::Source::RFID,
+                                 DetectionAlerts::hash(uid, *uidLenOut));
+        }
         return true;
       }
       if (millis() - t0 > timeoutMs) {

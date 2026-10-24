@@ -2,7 +2,7 @@
 
 // Shared display chrome. Geometry and content stay with each menu caller.
 // Selected cells use UI.icon so existing black text/icons remain readable.
-// Resting cells are flat with a single divider; boot is a short static logo.
+// Resting cells are flat with a single divider; startup shows product/version.
 #include "shared.h"
 
 void playSharkBoot();

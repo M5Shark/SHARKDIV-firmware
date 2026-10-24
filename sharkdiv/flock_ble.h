@@ -14,6 +14,7 @@ struct Hit {
 constexpr int kMaxHits = 8;
 
 void begin();
+void setMatchSound(bool enabled); // per-tool mute; global mute also applies
 bool startWindow();          // non-blocking passive scan
 void stopWindow();
 // Copy of the matched devices, strongest first; entries unseen for

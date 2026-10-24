@@ -1,3 +1,4 @@
+#include "DetectionAlerts.h"
 #include "KeyboardUI.h"
 #include "SettingsStore.h"
 #include "Touchscreen.h"
@@ -520,7 +521,9 @@ double getMultiplicator() {
 }
 
 void wifi_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!buf || type == WIFI_PKT_MISC) return;
   wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  if (pkt->rx_ctrl.sig_len < 2 || pkt->rx_ctrl.rx_state != 0) return;
   wifi_pkt_rx_ctrl_t ctrl = (wifi_pkt_rx_ctrl_t)pkt->rx_ctrl;
 
   if (type == WIFI_PKT_MGMT && (pkt->payload[0] == 0xA0 || pkt->payload[0] == 0xC0 )) deauths++;
@@ -531,6 +534,11 @@ void wifi_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type) {
   const uint16_t packetLength = (uint16_t)ctrl.sig_len;
   tmpPacketCounter++;
   rssiSum += ctrl.rssi;
+  if ((type == WIFI_PKT_MGMT || type == WIFI_PKT_DATA) && packetLength >= 28 &&
+      (pkt->payload[0] & 0x03) == 0 && (pkt->payload[10] & 1) == 0) {
+    DetectionAlerts::notify(DetectionAlerts::Source::WiFi,
+                           DetectionAlerts::hash(pkt->payload + 10, 6));
+  }
 
   if (!pcapEnabled || !pcapFile || !pcapFreeQ || !pcapWriteQ || !pcapPool) return;
 
@@ -1623,7 +1631,7 @@ void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (!feature_active || stopScan || exitMode) return;
 
   wifi_promiscuous_pkt_t* packet = (wifi_promiscuous_pkt_t*) buf;
-  if (!packet || !packet->payload) {
+  if (!packet || packet->rx_ctrl.sig_len < 30 || packet->rx_ctrl.rx_state != 0) {
     return;
   }
   uint8_t* payload = packet->payload;
@@ -1640,6 +1648,8 @@ void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
           deauth[i]++;
           deauthAlertIndex = i;
           deauthAlertPending = true;
+          DetectionAlerts::notify(DetectionAlerts::Source::WiFi,
+                                 DetectionAlerts::hash(senderMAC, sizeof(senderMAC)));
           break;
         }
       }
@@ -2395,6 +2405,11 @@ void startWiFiScan() {
   if (numNetworks >= 0) {
     bgHasResults = true;
     bgLastScanMs = millis();
+    for (int i = 0; i < numNetworks; ++i) {
+      const auto* ap = static_cast<const wifi_ap_record_t*>(WiFi.getScanInfoByIndex(i));
+      if (ap) DetectionAlerts::notify(DetectionAlerts::Source::WiFi,
+                                     DetectionAlerts::hash(ap->bssid, 6));
+    }
   }
 
   displayWiFiList(true);
@@ -6925,35 +6940,28 @@ static void runScan() {
   displayScanning();
   updateNavLabels();
 
+  pauseBackgroundRadioTasks();
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true, true);
+  WiFi.disconnect(false, false);
   delay(40);
   WiFi.scanDelete();
 
   const uint32_t dwell = wifiStaScanMsPerChannel();
   const int n = WiFi.scanNetworks(false, true, false, dwell);
 
-  if (n > 0) {
-    uint16_t apNum = (uint16_t)n;
-    wifi_ap_record_t* rec =
-        (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * apNum);
-    if (rec) {
-      if (esp_wifi_scan_get_ap_records(&apNum, rec) == ESP_OK) {
-        for (uint16_t i = 0; i < apNum && s_count < MAX_WPS_APS; i++) {
-          if (!rec[i].wps) {
-            continue;
-          }
-          WpsAp& e = s_aps[s_count];
-          truncCopy(e.ssid, sizeof(e.ssid), (const char*)rec[i].ssid, 32);
-          memcpy(e.bssid, rec[i].bssid, 6);
-          e.rssi = rec[i].rssi;
-          e.channel = rec[i].primary;
-          e.authmode = rec[i].authmode;
-          s_count++;
-        }
-      }
-      free(rec);
-    }
+  // Arduino owns the results after _scanDone() drains the ESP-IDF scan list.
+  // Reading esp_wifi_scan_get_ap_records a second time always loses those APs.
+  for (int i = 0; i < n && s_count < MAX_WPS_APS; ++i) {
+    const auto* rec = static_cast<const wifi_ap_record_t*>(WiFi.getScanInfoByIndex(i));
+    if (!rec || !rec->wps) continue;
+    WpsAp& e = s_aps[s_count++];
+    truncCopy(e.ssid, sizeof(e.ssid), reinterpret_cast<const char*>(rec->ssid), 32);
+    memcpy(e.bssid, rec->bssid, 6);
+    e.rssi = rec->rssi;
+    e.channel = rec->primary;
+    e.authmode = rec->authmode;
+    DetectionAlerts::notify(DetectionAlerts::Source::WiFi,
+                           DetectionAlerts::hash(e.bssid, 6));
   }
 
   if (s_count > 1) {

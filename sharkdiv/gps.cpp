@@ -1,3 +1,4 @@
+#include "DetectionAlerts.h"
 #include <Arduino.h>
 #include <HardwareSerial.h>
 #include <TFT_eSPI.h>
@@ -16,6 +17,7 @@
 #include "freertos/task.h"
 
 #include "BleCompat.h"
+#include "BleHostOperation.h"
 
 #include "gps.h"
 #include "icon.h"
@@ -151,6 +153,37 @@ double navLon = NAN;
 float navAltM = NAN;
 bool rmcNavValid = false;
 uint32_t lastNavMs = 0;
+static bool s_alertHadFix = false;
+static uint32_t s_alertLastFixSentenceMs = 0;
+
+static bool validNmeaChecksum(const char* line) {
+  if (!line || line[0] != '$') return false;
+  uint8_t sum = 0;
+  const char* p = line + 1;
+  for (; *p && *p != '*'; ++p) {
+    if (static_cast<unsigned char>(*p) < 32 || static_cast<unsigned char>(*p) > 126) return false;
+    sum ^= static_cast<uint8_t>(*p);
+  }
+  if (*p != '*' || !p[1] || !p[2] || p[3]) return false;
+  auto hex = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+  };
+  const int hi = hex(p[1]), lo = hex(p[2]);
+  return hi >= 0 && lo >= 0 && sum == static_cast<uint8_t>((hi << 4) | lo);
+}
+
+static void observeGpsFix(bool valid) {
+  const uint32_t now = millis();
+  if (valid && (!s_alertHadFix || now - s_alertLastFixSentenceMs > 5000u)) {
+    DetectionAlerts::notify(DetectionAlerts::Source::GPS, 1);
+  }
+  s_alertHadFix = valid;
+  s_alertLastFixSentenceMs = now;
+}
+
 
 void stripChecksum(char* s) {
   char* star = strchr(s, '*');
@@ -271,17 +304,26 @@ void parseOptionalInt16(const char* p, int16_t& out) {
 }
 
 double dmToDeg(const char* dm, char dir) {
-  if (!dm || !*dm || (dir != 'N' && dir != 'S' && dir != 'E' && dir != 'W')) {
-    return NAN;
+  if (!dm || !*dm || (dir != 'N' && dir != 'S' && dir != 'E' && dir != 'W')) return NAN;
+  const bool latitude = dir == 'N' || dir == 'S';
+  size_t digits = 0;
+  bool decimal = false;
+  for (const char* p = dm; *p; ++p) {
+    if (*p == '.' && !decimal) { decimal = true; continue; }
+    if (*p < '0' || *p > '9') return NAN;
+    if (!decimal) ++digits;
   }
-  double v = strtod(dm, nullptr);
-  int deg = (int)(v / 100.0);
-  double minutes = v - (double)deg * 100.0;
-  double dec = (double)deg + minutes / 60.0;
-  if (dir == 'S' || dir == 'W') {
-    dec = -dec;
-  }
-  return dec;
+  if (digits != (latitude ? 4u : 5u)) return NAN;
+  char* end = nullptr;
+  const double v = strtod(dm, &end);
+  if (!end || *end || !isfinite(v)) return NAN;
+  const int deg = static_cast<int>(v / 100.0);
+  const double minutes = v - static_cast<double>(deg) * 100.0;
+  const int maxDegrees = latitude ? 90 : 180;
+  if (deg > maxDegrees || minutes < 0.0 || minutes >= 60.0 ||
+      (deg == maxDegrees && minutes != 0.0)) return NAN;
+  const double dec = static_cast<double>(deg) + minutes / 60.0;
+  return (dir == 'S' || dir == 'W') ? -dec : dec;
 }
 
 void formatUtcFromField(const char* field) {
@@ -486,6 +528,10 @@ bool handleGgaSentence(char* sentence) {
   }
 
   lastNavMs = millis();
+  const bool actualFix = fixQuality >= 1 && fixQuality <= 5 &&
+                         fields[6][1] == '\0' && fields[3][1] == '\0' && fields[5][1] == '\0' &&
+                         isfinite(navLat) && isfinite(navLon);
+  observeGpsFix(actualFix);
   return true;
 }
 
@@ -517,11 +563,15 @@ bool handleRmcSentence(char* sentence) {
   formatDateFromRmc(fields[9]);
 
   lastNavMs = millis();
+  const char mode = nf > 12 ? fields[12][0] : '\0';
+  observeGpsFix(rmcNavValid && fields[2][1] == '\0' && fields[4][1] == '\0' &&
+                fields[6][1] == '\0' && isfinite(navLat) && isfinite(navLon) &&
+                mode != 'N' && mode != 'E' && mode != 'M' && mode != 'S');
   return true;
 }
 
 void dispatchNmeaLine(char* line) {
-  if (line[0] != '$' || strlen(line) < 7) {
+  if (!validNmeaChecksum(line) || strlen(line) < 7) {
     return;
   }
   char t4 = line[3];
@@ -1270,6 +1320,8 @@ void session() {
   rmcNavValid = false;
 
   gpsSerial.end();
+  s_alertHadFix = false;
+  s_alertLastFixSentenceMs = 0;
   gpsSerial.begin(GPS_UART_BAUD, SERIAL_8N1, GPS_UART_RX, GPS_UART_TX);
 
   const int panelH = tft.height() - kGfxTop;
@@ -3274,6 +3326,8 @@ static void wardDoWifiScanLog(File& logf, uint32_t now, uint32_t* linesWr, uint3
     } else {
       mac[0] = '\0';
     }
+    if (bssid) DetectionAlerts::notify(DetectionAlerts::Source::WiFi,
+                                       DetectionAlerts::hash(bssid, 6));
     wardLogPushWifiAp(ssidc, WiFi.channel(i), WiFi.RSSI(i), mac);
     wardPrintCsvGpsPrefix(logf, now);
     logf.print("WIFI,");
@@ -3292,26 +3346,28 @@ static void wardDoWifiScanLog(File& logf, uint32_t now, uint32_t* linesWr, uint3
   WiFi.scanDelete();
 }
 
-static bool s_wardBleScanReady = false;
-
-static void wardEnsureBleScan() {
-  if (s_wardBleScanReady) {
-    return;
-  }
-  ensureBleStackReady();
-  BLEScan* s = BLEDevice::getScan();
-  if (!s) {
-    return;
-  }
-  s->setActiveScan(true);
-  s->setInterval(134);
-  s->setWindow(99);
-  s_wardBleScanReady = true;
+static bool wardEnsureBleScan() {
+  if (!ensureBleStackReady()) return false;
+  BLEScan* scan = BLEDevice::getScan();
+  if (!scan) return false;
+  struct Command { BLEScan* scan; bool ready; } command = {scan, false};
+  const bool executed = runBleHostOperation([](void* context) {
+    Command& c = *static_cast<Command*>(context);
+    if (!c.scan->stop()) return;
+    c.scan->setAdvertisedDeviceCallbacks(nullptr);
+    c.scan->clearResults();
+    c.scan->setMaxResults(64);
+    c.scan->setActiveScan(false);
+    c.scan->setDuplicateFilter(true);
+    c.scan->setInterval(134);
+    c.scan->setWindow(99);
+    c.ready = true;
+  }, &command);
+  return executed && command.ready;
 }
 
 static void wardDoBleScanLog(File& logf, uint32_t now, uint32_t* linesWr, uint32_t* scanCt) {
-  wardEnsureBleScan();
-  BLEScan* scan = BLEDevice::getScan();
+  BLEScan* scan = wardEnsureBleScan() ? BLEDevice::getScan() : nullptr;
   if (!scan) {
     (*scanCt)++;
     wardLogPush("BLE: no scan");
@@ -3335,6 +3391,8 @@ static void wardDoBleScanLog(File& logf, uint32_t now, uint32_t* linesWr, uint32
     snprintf(mac, sizeof(mac), "%s", d.getAddress().toString().c_str());
     const std::string bleName = d.getName();
     const char* namec = bleName.empty() ? "" : bleName.c_str();
+    DetectionAlerts::notify(DetectionAlerts::Source::BLE,
+        DetectionAlerts::hash(reinterpret_cast<const uint8_t*>(mac), strlen(mac)));
     wardLogPushBleDev(namec, d.getRSSI(), mac);
     wardPrintCsvGpsPrefix(logf, now);
     logf.print("BLE,");
@@ -3430,6 +3488,8 @@ static void wardBgTask(void* /*param*/) {
   rmcNavValid = false;
 
   gpsSerial.end();
+  s_alertHadFix = false;
+  s_alertLastFixSentenceMs = 0;
   gpsSerial.begin(GPS_UART_BAUD, SERIAL_8N1, GPS_UART_RX, GPS_UART_TX);
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -3644,6 +3704,8 @@ void session() {
     lastNavMs = 0;
 
     gpsSerial.end();
+    s_alertHadFix = false;
+    s_alertLastFixSentenceMs = 0;
     gpsSerial.begin(GPS_UART_BAUD, SERIAL_8N1, GPS_UART_RX, GPS_UART_TX);
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -4065,6 +4127,8 @@ void session() {
   GpsWardriver::stopBackgroundIfRunning();
   lineLen = 0;
   gpsSerial.end();
+  s_alertHadFix = false;
+  s_alertLastFixSentenceMs = 0;
   gpsSerial.begin(GPS_UART_BAUD, SERIAL_8N1, GPS_UART_RX, GPS_UART_TX);
 
   chrome();
@@ -4200,6 +4264,8 @@ void session() {
   GpsWardriver::stopBackgroundIfRunning();
   lineLen = 0;
   gpsSerial.end();
+  s_alertHadFix = false;
+  s_alertLastFixSentenceMs = 0;
   gpsSerial.begin(GPS_UART_BAUD, SERIAL_8N1, GPS_UART_RX, GPS_UART_TX);
 
   chrome();

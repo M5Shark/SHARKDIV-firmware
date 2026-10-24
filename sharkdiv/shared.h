@@ -93,7 +93,7 @@ uint16_t uiUniversalColor();
 #define ESP32DIV_NAME "SHARKDIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.7.30-flock"
+#define ESP32DIV_VERSION "v1.7.31-alerts"
 #endif
 
 
@@ -833,8 +833,8 @@ uint16_t uiUniversalColor();
 // Dim label text color (used for *text* only).
 // Keep UI_LABLE unchanged because it's also used for fills (e.g., status bar bg).
 static inline uint16_t uiDimTextColor() {
-  // SHARKDIV brand theme: green-grey secondary text.
-  if (UI.icon == BRAND_ACCENT) return BRAND_MUTED;
+  // Shark uses neutral controls; secondary text stays readable on black.
+  if (UI.bg == 0x0000 && UI.text == BRAND_INK) return BRAND_MUTED;
   // In Dark/Hacker themes the label fill is intentionally very dark;
   // brighten text a bit so secondary text stays readable on black.
   return (UI.bg == BG_Dark || UI.bg == 0x0000) ? GRAY : UI_LABLE;

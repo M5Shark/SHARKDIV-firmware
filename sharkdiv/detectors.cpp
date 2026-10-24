@@ -1,5 +1,6 @@
 // detectors.cpp — bounded, passive BLE/Wi-Fi broadcast candidate receivers.
 // Match evidence and radio activity are shown separately from device identity.
+#include "DetectionAlerts.h"
 #include "detectors.h"
 #include "RemoteIdParser.h"
 #include "BleHostOperation.h"
@@ -111,9 +112,18 @@ static bool gearMode(const Sig& s) { return !strcmp(s.detName, "LE Gear"); }
 static void upsert(const Sig* expected, const char* desc, const char* mac,
                    int8_t rssi, uint8_t channel, uint8_t evidence) {
   portENTER_CRITICAL(&s_detectorLock);
-  if (s_active == expected)
-    s_table.observe(desc, mac, rssi, channel, evidence, millis());
+  const bool accepted = expected && s_active == expected;
+  if (accepted) s_table.observe(desc, mac, rssi, channel, evidence, millis());
   portEXIT_CRITICAL(&s_detectorLock);
+  if (!accepted) return;
+  // Inspector observations are ordinary BLE events, even if its selected
+  // signature belongs to a specialized receiver.
+  const bool matched = evidence != DetectorSupport::Advertisement;
+  const auto source = matched && cameraMode(*expected) ? DetectionAlerts::Source::Camera :
+                      matched && gearMode(*expected) ? DetectionAlerts::Source::Gear :
+                      channel ? DetectionAlerts::Source::WiFi : DetectionAlerts::Source::BLE;
+  DetectionAlerts::notify(source, DetectionAlerts::hash(
+      reinterpret_cast<const uint8_t*>(mac), strlen(mac)));
 }
 static int detectorSnapshot(Hit* out, uint32_t* wifiFrames = nullptr,
                             uint32_t* bleAdvertisements = nullptr) {
@@ -239,16 +249,21 @@ static bool stopDetectorWifi() {
   DetectorWifiDriver radio;
   return PassiveWifiLifecycle::stop(radio);
 }
-static bool startDetectorWifi() {
+static bool startPassiveMonitor(void (*receiver)(void*, wifi_promiscuous_pkt_type_t)) {
   DetectorWifiDriver radio;
-  if (!PassiveWifiLifecycle::start(radio)) return false;
+  if (!PassiveWifiLifecycle::start(radio)) { stopDetectorWifi(); return false; }
   wifi_promiscuous_filter_t filter = {};
   filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
-  return esp_wifi_set_promiscuous_filter(&filter) == ESP_OK &&
-         esp_wifi_set_promiscuous_rx_cb(&detectorWifiCallback) == ESP_OK &&
-         esp_wifi_set_promiscuous(true) == ESP_OK &&
-         esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE) == ESP_OK;
+  // Enable delivery last: a failed configuration must not leave a partially
+  // configured receiver running behind an error screen.
+  const bool ready = esp_wifi_set_promiscuous_filter(&filter) == ESP_OK &&
+      esp_wifi_set_promiscuous_rx_cb(receiver) == ESP_OK &&
+      esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE) == ESP_OK &&
+      esp_wifi_set_promiscuous(true) == ESP_OK;
+  if (!ready) stopDetectorWifi();
+  return ready;
 }
+static bool startDetectorWifi() { return startPassiveMonitor(&detectorWifiCallback); }
 
 // ── detector screens ───────────────────────────────────────────────
 static void chrome(const char* title, const char* chip) {
@@ -412,6 +427,7 @@ static void ridRecord(const uint8_t* mac, uint8_t channel, int8_t rssi,
     hit.locationMs = now;
   }
   portEXIT_CRITICAL(&s_ridLock);
+  DetectionAlerts::notify(DetectionAlerts::Source::Drone, DetectionAlerts::hash(mac, 6));
 }
 
 class RidCallbacks : public BLEAdvertisedDeviceCallbacks {
@@ -444,16 +460,7 @@ static void ridWifiCallback(void* buffer, wifi_promiscuous_pkt_type_t type) {
               packet->rx_ctrl.rssi, value);
 }
 
-static bool ridStartWifi() {
-  DetectorWifiDriver radio;
-  if (!PassiveWifiLifecycle::start(radio)) return false;
-  wifi_promiscuous_filter_t filter = {};
-  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
-  return esp_wifi_set_promiscuous_filter(&filter) == ESP_OK &&
-         esp_wifi_set_promiscuous_rx_cb(&ridWifiCallback) == ESP_OK &&
-         esp_wifi_set_promiscuous(true) == ESP_OK &&
-         esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE) == ESP_OK;
-}
+static bool ridStartWifi() { return startPassiveMonitor(&ridWifiCallback); }
 
 static int ridSnapshot(RidHit* out) {
   portENTER_CRITICAL(&s_ridLock);
@@ -572,7 +579,7 @@ static void runRemoteId() {
   chrome("REMOTE ID", nullptr);
   setTouchNavLabels("Prev", "Clear", "Exit", "View", "Next");
   redrawTouchButtonBar();
-  const bool wifiOk = ridStartWifi();
+  bool wifiOk = ridStartWifi();
   const bool bleReady = ensureBleStackReady();
   struct ScanStart {
     BLEScan* scan;
@@ -619,12 +626,13 @@ static void runRemoteId() {
     const uint32_t now = millis();
     if (wifiOk && now - lastHop >= 300) {
       lastHop = now;
-      channel = channel % 11 + 1;
-      esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+      const uint8_t next = channel % 11 + 1;
+      if (esp_wifi_set_channel(next, WIFI_SECOND_CHAN_NONE) == ESP_OK) channel = next;
+      else { wifiOk = false; stopDetectorWifi(); }
     }
     if (now - lastPaint >= 350) {
       lastPaint = now;
-      ridPaint(cursor, details, wifiOk, bleOk, channel);
+      ridPaint(cursor, details, wifiOk, bleOk && start.scan && start.scan->isScanning(), channel);
     }
     delay(20);
   }
@@ -666,7 +674,7 @@ static void runDetector(int sigIdx, bool inspector = false) {
   const bool wantBle = cameraMode(signature) || signature.bleNames[0] ||
       signature.bleUuid16[0] || signature.bleCompany[0] || inspector ||
       !strcmp(signature.detName, "Device Scout");
-  const bool wifiOk = wantWifi && startDetectorWifi();
+  bool wifiOk = wantWifi && startDetectorWifi();
   struct BleStart { BLEScan* scan; bool configured; bool started; } ble = {nullptr, false, false};
   const bool bleExecuted = wantBle && ensureBleStackReady() && runBleHostOperation([](void* context) {
     BleStart& request = *static_cast<BleStart*>(context);
@@ -705,12 +713,14 @@ static void runDetector(int sigIdx, bool inspector = false) {
     const uint32_t now = millis();
     if (wifiOk && now - lastHop >= 250) {
       lastHop = now;
-      channel = channel % 11 + 1;
-      esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+      const uint8_t next = channel % 11 + 1;
+      if (esp_wifi_set_channel(next, WIFI_SECOND_CHAN_NONE) == ESP_OK) channel = next;
+      else { wifiOk = false; stopDetectorWifi(); }
     }
     if (now - lastPaint >= 350) {
       lastPaint = now;
-      paintHits(cursor, details, signature, wantWifi, wantBle, wifiOk, bleOk, channel, inspector);
+      paintHits(cursor, details, signature, wantWifi, wantBle, wifiOk,
+                bleOk && ble.scan && ble.scan->isScanning(), channel, inspector);
     }
     delay(20);
   }
