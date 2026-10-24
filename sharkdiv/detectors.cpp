@@ -2,6 +2,7 @@
 // passive BLE observer scan + WiFi async scan (+ OUI from BSSIDs), hits
 // scored by matched evidence, RSSI meter + locate view per target.
 #include "detectors.h"
+#include "icon.h"
 #include "config.h"
 #include "utils.h"
 #include "Touchscreen.h"
@@ -22,6 +23,27 @@ struct Sig {
   uint16_t bleCompany[2];      // manufacturer company IDs (0 = end)
   const char* wifiSsids[3];    // SSID substrings
   const char* wifiOuis[4];     // BSSID OUI prefixes "xx:xx:xx"
+};
+
+// per-detector icon + short chip label for the launcher
+static const unsigned char* const kSigIcons[] = {
+  bitmap_icon_analyzer,   // Flipper
+  bitmap_icon_stat,       // Meshtastic
+  bitmap_icon_stat,       // MeshCore
+  bitmap_icon_tags,       // Tile
+  bitmap_icon_tags,       // SmartTag
+  bitmap_icon_dialog,     // RayBan
+  bitmap_icon_list,       // iBeacon
+  bitmap_icon_no_signal,  // Pineapple
+  bitmap_icon_magnifying_glass, // Pwnagotchi
+  bitmap_icon_scanner,    // Cameras
+  bitmap_icon_kill,       // LE Gear  (placeholder reuse)
+  bitmap_icon_satellite,  // Drone
+  bitmap_icon_follow,     // Scout
+};
+static const char* const kSigChips[] = {
+  "DEVICE", "MESH", "MESH", "TRACKER", "TRACKER", "WEARABLE",
+  "LOCATION", "ROGUE AP", "AGENT", "CAMERA", "LE GEAR", "DRONE", "SWEEP",
 };
 
 static const Sig kSigs[] = {
@@ -260,18 +282,31 @@ static void wifiScan(const Sig& s) {
 }
 
 // ── per-detector screen ─────────────────────────────────────────────
-static void chrome(const char* title) {
+static void chrome(const char* title, const char* chip) {
   setTouchButtonInputEnabled(true);
   setTouchNavLabels("Prev", "Rescan", "Home", "Locate", "Next");
   featureClearContent(TFT_BLACK);
   drawStatusBar(readBatteryVoltage(), true);
+
+  // header: accent brand block + title + category chip, ctOS style
+  tft.fillRect(0, 22, tft.width(), 22, TFT_BLACK);
+  const int16_t badgeW = tft.textWidth("SHARKDIV", 1) + 10;
+  tft.fillRect(0, 22, badgeW, 20, UI_ICON);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_BLACK, UI_ICON);
+  tft.drawString("SHARKDIV", badgeW / 2, 32, 1);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(UI_ICON, TFT_BLACK);
-  tft.drawString(String("// ") + title, 6, 28, 2);
-  tft.drawFastHLine(0, 38, tft.width(), UI_LINE);
+  tft.drawString(String("// ") + title, badgeW + 6, 32, 2);
+  if (chip) {
+    const int16_t cw = tft.textWidth(chip, 1) + 10;
+    tft.drawRect(tft.width() - cw - 6, 25, cw, 15, UI_LABLE);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(UI_LABLE, TFT_BLACK);
+    tft.drawString(chip, tft.width() - cw / 2 - 6, 32, 1);
+  }
   tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-  tft.drawString("passive receive-only", 8, 44, 1);
+  tft.drawFastHLine(0, 44, tft.width(), UI_LINE);
   setupTouchscreen();
   redrawTouchButtonBar();
 }
@@ -285,41 +320,79 @@ static uint16_t confColor(uint8_t c) {
 
 static void paintHits(int cursor, bool locateMode) {
   const int16_t bottom = touchNavContentBottomY() > 0 ? touchNavContentBottomY()
-                                                      : tft.height() - 44;
-  tft.fillRect(0, 56, tft.width(), bottom - 56, TFT_BLACK);
+                                                      : tft.height() - 60;
+  tft.fillRect(0, 46, tft.width(), bottom - 46, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
+
   if (s_hitCount == 0) {
+    // live pulse: the screen breathes while listening
+    const bool on = (millis() / 400) & 1;
+    const int16_t cx = tft.width() / 2;
+    tft.drawCircle(cx, 110, 5, on ? 0x07E0 : UI_LINE);
+    tft.drawCircle(cx, 110, 11, UI_LINE);
     tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-    tft.drawString("listening...", 8, 120, 2);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("sweeping the airwaves...", cx, 140, 2);
+    tft.setTextDatum(TL_DATUM);
     return;
   }
-  int y = 56;
-  for (int i = 0; i < s_hitCount && y + 24 < bottom - 40; i++) {
-    const bool sel = (i == cursor);
-    tft.fillRect(4, y, tft.width() - 8, 22, sel ? UI_LABLE : TFT_BLACK);
-    tft.drawRect(4, y, tft.width() - 8, 22, sel ? UI_ICON : UI_LINE);
-    tft.setTextColor(sel ? UI_ICON : UI_TEXT, TFT_BLACK);
-    char l[44];
-    snprintf(l, sizeof(l), "%.28s %d", s_hits[i].desc, s_hits[i].rssi);
-    tft.drawString(l, 8, y + 3, 2);
-    tft.setTextDatum(TR_DATUM);
-    tft.setTextColor(confColor(s_hits[i].confidence), TFT_BLACK);
-    if (locateMode && sel) {
-      tft.drawString("LOCATE", tft.width() - 8, y + 6, 1);
-    } else {
-      tft.drawString(confName(s_hits[i].confidence), tft.width() - 8, y + 6, 1);
-    }
-    tft.setTextDatum(TL_DATUM);
-    y += 24;
-  }
-  // locate meter for the selected target
+
   if (locateMode && cursor < s_hitCount) {
-    const int r = s_hits[cursor].rssi;
-    const int v = constrain((r + 100) * 100 / 60, 0, 100);
-    tft.drawRect(8, bottom - 34, tft.width() - 16, 12, UI_LINE);
-    tft.fillRect(10, bottom - 32, (tft.width() - 20) * v / 100, 8, 0x07E0);
+    // radial locate meter — big dBm + arc that fills with proximity
+    const Hit& h = s_hits[cursor];
+    const int rssi = h.rssi;
+    const int v = constrain((rssi + 100) * 100 / 60, 0, 100);
+    const int16_t cx = tft.width() / 2, cy = 118, rad = 62;
+    // arc segments: 12 segments, lit count = v
+    for (int seg = 0; seg < 12; seg++) {
+      const float a = -PI / 2 + seg * (PI / 12.0f) * 1.55f - 0.75f;
+      const int16_t x0 = cx + cosf(a) * (rad - 7), y0 = cy + sinf(a) * (rad - 7);
+      const int16_t x1 = cx + cosf(a) * rad,       y1 = cy + sinf(a) * rad;
+      const bool lit = (seg * 100 / 12) < v;
+      tft.drawLine(x0, y0, x1, y1, lit ? 0x07E0 : UI_LINE);
+      tft.drawLine(x0 + 1, y0, x1 + 1, y1, lit ? 0x07E0 : UI_LINE);
+    }
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(0x07E0, TFT_BLACK);
+    tft.drawString(String(rssi), cx, cy - 4, 6);
+    tft.setTextColor(UI_TEXT, TFT_BLACK);
+    tft.drawString("dBm", cx, cy + 24, 2);
     tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-    tft.drawString(String(r) + " dBm - walk to peak", 8, bottom - 20, 1);
+    tft.drawString(h.desc, cx, cy + 48, 1);
+    tft.drawString("walk toward the peak", cx, cy + 62, 1);
+    tft.setTextDatum(TL_DATUM);
+    return;
+  }
+
+  // hit rows: name + mac, inline RSSI bar, confidence pill
+  int y = 48;
+  for (int i = 0; i < s_hitCount && y + 30 < bottom; i++) {
+    const bool sel = (i == cursor);
+    if (sel) {
+      tft.fillRect(4, y, tft.width() - 8, 28, UI_LABLE);
+      tft.fillRect(4, y, 3, 28, UI_ICON);   // accent rail on selection
+    }
+    tft.drawRect(4, y, tft.width() - 8, 28, sel ? UI_ICON : UI_LINE);
+    tft.setTextColor(sel ? UI_ICON : UI_TEXT, TFT_BLACK);
+    tft.drawString(s_hits[i].desc, 10, y + 3, 2);
+    tft.setTextColor(UI_DIM_TEXT, sel ? UI_LABLE : TFT_BLACK);
+    tft.drawString(s_hits[i].mac, 10, y + 19, 1);
+    // inline RSSI bar
+    const int rv = constrain((s_hits[i].rssi + 100) * 100 / 60, 0, 100);
+    tft.drawRect(150, y + 6, 56, 8, UI_LINE);
+    tft.fillRect(152, y + 8, 52 * rv / 100, 4,
+                 s_hits[i].rssi > -60 ? 0x07E0 : (s_hits[i].rssi > -80 ? UI_WARN : UI_DIM_TEXT));
+    // confidence pill
+    const char* cn = confName(s_hits[i].confidence);
+    const int16_t pw = tft.textWidth(cn, 1) + 8;
+    tft.fillRoundRect(tft.width() - pw - 8, y + 6, pw, 12, 3,
+                      s_hits[i].confidence >= 3 ? 0x07E0 :
+                      (s_hits[i].confidence == 2 ? UI_WARN : UI_LABLE));
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_BLACK, TFT_BLACK);
+    tft.drawString(cn, tft.width() - pw / 2 - 8, y + 12, 1);
+    tft.setTextDatum(TL_DATUM);
+    y += 30;
   }
 }
 
@@ -327,7 +400,7 @@ static void runDetector(int sigIdx) {
   const Sig& s = kSigs[sigIdx];
   s_active = &s;
   s_hitCount = 0;
-  chrome(s.detName);
+  chrome(s.detName, kSigChips[sigIdx]);
 
   bool wifiEver = s.wifiSsids[0] || s.wifiOuis[0] ||
                   !strcmp(s.detName, "WiFi Cameras") || !strcmp(s.detName, "LE Gear");
@@ -403,7 +476,7 @@ static void runDetector(int sigIdx) {
 static uint32_t lastPaint = 0;
 
 static void runInspector() {
-  chrome("BLE INSPECTOR");
+  chrome("BLE INSPECTOR", "RAW DECODE");
   s_active = nullptr;
   ensureBleStackReady();
   BLEScan* scan = BLEDevice::getScan();
@@ -435,6 +508,11 @@ void runLauncher() {
   loadOuiFile("/flock/gear-ouis.txt", s_gearOuis, &s_gearOuiCount, 24);
 
   const int listCount = kSigCount + 1;   // + BLE Inspector
+  const int cols = 2;
+  const int cardW = (tft.width() - 24) / cols;
+  const int cardH = 46;
+  const int gridTop = 48;
+
   int cursor = 0;
   bool redraw = true;
   feature_active = true;
@@ -447,24 +525,44 @@ void runLauncher() {
       setTouchNavLabels(nullptr, nullptr, "Home", nullptr, nullptr);
       featureClearContent(TFT_BLACK);
       drawStatusBar(readBatteryVoltage(), true);
+
+      // brand header like the home screen
+      tft.fillRect(0, 0, tft.width(), 22, TFT_BLACK);
       tft.setTextDatum(ML_DATUM);
       tft.setTextColor(UI_ICON, TFT_BLACK);
-      tft.drawString("// DETECTORS", 6, 28, 2);
-      tft.drawFastHLine(0, 38, tft.width(), UI_LINE);
-      tft.setTextDatum(TL_DATUM);
-      for (int i = 0; i < listCount; i++) {
-        const int y = 46 + i * 22;
-        const bool sel = (i == cursor);
-        tft.fillRect(4, y, tft.width() - 8, 20, sel ? UI_LABLE : TFT_BLACK);
-        tft.drawRect(4, y, tft.width() - 8, 20, sel ? UI_ICON : UI_LINE);
-        tft.setTextColor(sel ? UI_ICON : UI_TEXT, TFT_BLACK);
-        tft.drawString(String(sel ? "> " : "  ") +
-                       (i < kSigCount ? kSigs[i].detName : "BLE Inspector"),
-                       8, y + 4, 2);
-      }
+      tft.drawString("DETECTORS", 8, 11, 2);
+      tft.setTextDatum(MR_DATUM);
       tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-      tft.drawString("passive / receive-only - tap or SELECT", 8,
-                     46 + listCount * 22 + 4, 1);
+      tft.drawString("passive sweep  //", tft.width() - 8, 12, 1);
+      tft.setTextDatum(TL_DATUM);
+      tft.drawFastHLine(0, 22, tft.width(), UI_LINE);
+
+      for (int i = 0; i < listCount; i++) {
+        const int cx = 8 + (i % cols) * (cardW + 8);
+        const int cy = gridTop + (i / cols) * (cardH + 8);
+        const bool sel = (i == cursor);
+        // card: hard edges, accent rail + corner ticks when selected
+        tft.fillRect(cx, cy, cardW, cardH, UI_FG);
+        if (sel) {
+          tft.drawRect(cx, cy, cardW, cardH, UI_ICON);
+          tft.fillRect(cx, cy, 3, cardH, UI_ICON);
+        } else {
+          tft.drawRect(cx, cy, cardW, cardH, UI_LINE);
+        }
+        const unsigned char* ic = (i < kSigCount) ? kSigIcons[i]
+                                                  : bitmap_icon_magnifying_glass;
+        tft.drawBitmap(cx + 10, cy + (cardH - 16) / 2, ic, 16, 16,
+                       sel ? UI_ICON : UI_TEXT);
+        tft.setTextColor(sel ? UI_ICON : UI_TEXT, UI_FG);
+        String name = (i < kSigCount) ? kSigs[i].detName : "BLE Inspector";
+        while (tft.textWidth(name, 2) > cardW - 38 && name.length() > 3) {
+          name.remove(name.length() - 1);
+        }
+        tft.drawString(name, cx + 32, cy + 8, 2);
+        tft.setTextColor(UI_DIM_TEXT, UI_FG);
+        tft.drawString(i < kSigCount ? kSigChips[i] : "RAW DECODE",
+                       cx + 32, cy + 27, 1);
+      }
       setupTouchscreen();
       redrawTouchButtonBar();
     }
@@ -500,8 +598,9 @@ void runLauncher() {
     if (readTouchXY(tx, ty)) {
       delay(30);
       for (int i = 0; i < listCount; i++) {
-        const int y = 46 + i * 22;
-        if (ty >= y && ty <= y + 20) {
+        const int cx = 8 + (i % cols) * (cardW + 8);
+        const int cy = gridTop + (i / cols) * (cardH + 8);
+        if (tx >= cx && tx <= cx + cardW && ty >= cy && ty <= cy + cardH) {
           if (i < kSigCount) runDetector(i);
           else runInspector();
           feature_active = true;
