@@ -12,7 +12,7 @@
 // nRF24L01        : NRF24_SCAN_CE / NRF24_SCAN_CSN / NRF24_SPI_*
 // CC1101          : CC1101_CS / CC1101_GDO0 / CC1101_SPI pins
 // GPS             : GPS_UART_RX / GPS_UART_TX / GPS_UART_BAUD
-// Buzzer          : BUZZER_PIN (ledc channel 1, as in setup())
+// Buzzer          : BUZZER_PIN (DetectionAlerts service, LEDC channel 2)
 // SD              : SD_CS via the firmware's sdSpiInit()/sdMountChipSelect()
 
 namespace flk {

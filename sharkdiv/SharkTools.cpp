@@ -2,6 +2,7 @@
 // Each tool is a self-contained blocking-ish feature screen following the
 // ESP32-DIV pattern: Setup once on entry, Loop every pass, exit on leaving.
 
+#include "DetectionAlerts.h"
 #include "SharkTools.h"
 #include "config.h"
 #include <math.h>
@@ -48,29 +49,29 @@ void toolChrome(const char* title) {
 // and a radius from RSSI (-30 dBm at the centre, -90 dBm at the edge).
 namespace WifiRadar {
 
-static constexpr int16_t RCX = 120;
-static constexpr int16_t RCY = 168;
-static constexpr int16_t RR  = 88;
-
-static float    s_sweep = 0.0f;
-static uint32_t s_lastScan = 0;
-static int      s_found = 0;
-static String   s_bestName;
-static int      s_bestRssi = -128;
+static int16_t RCX = 120, RCY = 155, RR = 75;
+static int s_statusY = 240;
+static float s_sweep = 0.0f;
+static uint32_t s_lastScan = 0, s_scanStarted = 0;
+static bool s_scanRunning = false, s_ready = false;
+static int s_found = 0, s_error = 0;
+struct RadarHit { int8_t rssi; uint16_t angle; };
+static RadarHit s_hits[48];
+static int s_hitCount = 0;
+static String s_bestName;
+static int s_bestRssi = -128;
 
 static uint16_t keyHash(const uint8_t* p, int n) {
-  uint32_t h = 2166136261UL;
-  for (int i = 0; i < n; i++) { h ^= p[i]; h *= 16777619UL; }
+  uint32_t h = DetectionAlerts::hash(p, n);
   h ^= h >> 15;
   return (uint16_t)h;
 }
 
 static void drawFrame(float sweep) {
-  for (int16_t rr = RR; rr > 0; rr -= RR / 3)
+  for (int16_t rr = RR; rr > 0; rr -= max(1, RR / 3))
     tft.drawCircle(RCX, RCY, rr, UI_LINE);
   tft.drawFastHLine(RCX - RR, RCY, 2 * RR, UI_LABLE);
   tft.drawFastVLine(RCX, RCY - RR, 2 * RR, UI_LABLE);
-  // Sweep line with a faint trailing wedge.
   for (int8_t t = 0; t < 4; t++) {
     const float a = sweep - t * 0.10f;
     tft.drawLine(RCX, RCY, RCX + (int16_t)(cosf(a) * RR),
@@ -78,23 +79,66 @@ static void drawFrame(float sweep) {
   }
 }
 
+// Copy completed observations once, then release the driver's result storage.
+// Animating the saved plot never creates detection events.
+static void pollScan() {
+  const uint32_t now = millis();
+  if (s_scanRunning) {
+    const int result = WiFi.scanComplete();
+    if (result == WIFI_SCAN_RUNNING && uint32_t(now - s_scanStarted) < 6500) return;
+    if (result >= 0) {
+      s_found = result;
+      s_hitCount = 0;
+      s_bestRssi = -128;
+      s_bestName = "";
+      s_error = 0;
+      for (int i = 0; i < result; ++i) {
+        const uint8_t* mac = WiFi.BSSID(i);
+        if (!mac) continue;
+        const int rssi = WiFi.RSSI(i);
+        if (s_hitCount < int(sizeof(s_hits) / sizeof(s_hits[0])))
+          s_hits[s_hitCount++] = {(int8_t)rssi, keyHash(mac, 6)};
+        if (rssi > s_bestRssi) { s_bestRssi = rssi; s_bestName = WiFi.SSID(i); }
+        DetectionAlerts::notify(DetectionAlerts::Source::WiFi, DetectionAlerts::hash(mac, 6));
+      }
+      for (unsigned i = 0; i < s_bestName.length(); ++i)
+        if (uint8_t(s_bestName[i]) < 32 || uint8_t(s_bestName[i]) > 126) s_bestName[i] = '?';
+    } else {
+      s_error = result == WIFI_SCAN_RUNNING ? ESP_ERR_TIMEOUT : result;
+      esp_wifi_scan_stop();
+    }
+    WiFi.scanDelete();
+    s_scanRunning = false;
+    s_lastScan = now;
+    return;
+  }
+  if (!s_ready || uint32_t(now - s_lastScan) < 2500) return;
+  WiFi.scanDelete();
+  const int result = WiFi.scanNetworks(true, true, true, 180); // async, hidden, passive
+  s_scanRunning = result == WIFI_SCAN_RUNNING || result >= 0;
+  s_scanStarted = s_lastScan = now;
+  if (!s_scanRunning) s_error = result; // bounded retry, never a busy loop
+}
+
 void wifiRadarSetup() {
   pauseBackgroundRadioTasks();
   takeOverWifiRadio();
-  WiFi.mode(WIFI_MODE_STA);
-  WiFi.disconnect(false, true);
+  WiFi.setAutoReconnect(false);
+  s_ready = WiFi.mode(WIFI_MODE_STA);
+  WiFi.disconnect(false, false); // Preserve saved credentials and keep STA enabled.
   toolChrome("WIFI RADAR");
-
-  tft.setTextDatum(MC_DATUM);
+  const int bottom = featureHasTouchNavBar() ? touchNavContentBottomY() : tft.height();
+  s_statusY = bottom - 38;
+  RCX = tft.width() / 2;
+  RCY = (64 + s_statusY - 8) / 2;
+  RR = min(RCX - 12, (s_statusY - 8 - 64) / 2);
   tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-  tft.drawString("BACK / SELECT = exit", tft.width() / 2, 306, 1);
-  tft.setTextDatum(TL_DATUM);
-
-  WiFi.mode(WIFI_MODE_STA);
-  WiFi.disconnect(false, true);
+  tft.drawString("Radius = signal / angle = layout", 8, 45, 1);
   s_sweep = 0.0f;
-  s_lastScan = 0;
-  s_found = 0;
+  s_lastScan = millis() - 2500;
+  s_scanRunning = false;
+  s_found = s_hitCount = 0;
+  s_error = s_ready ? 0 : ESP_FAIL;
   s_bestName = "";
   s_bestRssi = -128;
 }
@@ -104,69 +148,42 @@ void wifiRadarLoop() {
     feature_exit_requested = true;
     return;
   }
-
-  // Rescan every ~2.5 s; the sweep animates between scans.
-  if (s_lastScan == 0 || millis() - s_lastScan > 2500) {
-    tft.fillRect(4, 262, tft.width() - 8, 12, TFT_BLACK);
-    tft.setTextColor(UI_WARN, TFT_BLACK);
-    tft.setTextDatum(TL_DATUM);
-    tft.drawString("scanning...", 8, 264, 1);
-    WiFi.scanDelete();  // a stale async scan makes every new scan fail
-    s_found = WiFi.scanNetworks(false, false);
-    if (s_found < 0) {
-      // Radio was busy (e.g. a leftover background scan): clear and retry
-      // on the next frame instead of showing -1 forever.
-      takeOverWifiRadio();
-      s_found = 0;
-      s_lastScan = 0;
-    } else {
-      s_lastScan = millis();
-    }
-  }
-
+  pollScan();
   tft.fillRect(RCX - RR - 2, RCY - RR - 2, 2 * RR + 4, 2 * RR + 4, TFT_BLACK);
   drawFrame(s_sweep);
-
-  s_bestRssi = -128;
-  s_bestName = "";
-  for (int i = 0; i < s_found; i++) {
-    const int rssi = WiFi.RSSI(i);
-    const uint8_t* bssid = WiFi.BSSID(i);
-    const uint16_t h = bssid ? keyHash(bssid, 6) : (uint16_t)(i * 2654);
-    const float ang = (h / 65535.0f) * 2.0f * PI;
+  for (int i = 0; i < s_hitCount; ++i) {
+    const int rssi = s_hits[i].rssi;
+    const float ang = (s_hits[i].angle / 65535.0f) * 2.0f * PI;
     const float norm = constrain((float)(-30 - rssi) / 60.0f, 0.05f, 1.0f);
     const int16_t br = (int16_t)(norm * RR);
     const int16_t bx = RCX + (int16_t)(cosf(ang) * br);
     const int16_t by = RCY + (int16_t)(sinf(ang) * br);
     const uint16_t col = rssi > -55 ? UI_ICON : (rssi > -75 ? UI_TEXT : GRAY);
     tft.fillCircle(bx, by, 2, col);
-    if (rssi > s_bestRssi) {
-      s_bestRssi = rssi;
-      s_bestName = WiFi.SSID(i);
-    }
   }
-
-  tft.fillRect(4, 262, tft.width() - 8, 30, TFT_BLACK);
+  tft.fillRect(4, s_statusY, tft.width() - 8, 38, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(UI_ICON, TFT_BLACK);
-  tft.drawString(String("APs: ") + s_found, 8, 264, 2);
+  tft.setTextColor(s_error ? UI_WARN : UI_ICON, TFT_BLACK);
+  const String status = s_error ? String("Scan error ") + s_error :
+      String("APs: ") + s_found + (s_scanRunning ? " / listening" : " / passive");
+  tft.drawString(status, 8, s_statusY, 1);
   if (s_bestName.length()) {
     tft.setTextColor(UI_TEXT, TFT_BLACK);
-    String s = String(s_bestRssi) + "dBm " + s_bestName;
-    while (s.length() > 3 && tft.textWidth(s, 1) > tft.width() - 16)
-      s.remove(s.length() - 1);
-    tft.drawString(s, 8, 282, 1);
+    String strongest = String(s_bestRssi) + "dBm " + s_bestName;
+    while (strongest.length() > 3 && tft.textWidth(strongest, 1) > tft.width() - 16)
+      strongest.remove(strongest.length() - 1);
+    tft.drawString(strongest, 8, s_statusY + 14, 1);
   }
-
   s_sweep += 0.22f;
-  if (s_sweep > 2.0f * PI)
-    s_sweep -= 2.0f * PI;
+  if (s_sweep > 2.0f * PI) s_sweep -= 2.0f * PI;
   delay(40);
 }
 
 void exit() {
+  if (s_scanRunning) esp_wifi_scan_stop();
+  s_scanRunning = false;
   WiFi.scanDelete();
-  WiFi.mode(WIFI_MODE_STA);  // restore STA so background scans resume
+  WiFi.mode(WIFI_MODE_STA);
 }
 
 }  // namespace WifiRadar

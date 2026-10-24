@@ -105,7 +105,6 @@ static void recordMatch(const char* mac, const char* name, int rssi, const char*
   r.lat = flock_gps::lat(); r.lon = flock_gps::lon();
   flock_gps::utc(r.utc, sizeof(r.utc)); r.follow = flock_gps::followAlert(mac);
   flock_log::add(r, s_settings[4]);
-  if (s_settings[3]) { ledcWriteTone(1, 2000); delay(50); ledcWriteTone(1, 0); }
 }
 static void scoreAndAlert() {
   refreshSnapshots();
@@ -317,6 +316,7 @@ void appSetup() {
   setTouchButtonInputEnabled(true); featureClearContent(TFT_BLACK);
   setStatusTitle("FLOCK"); drawStatusBar(readBatteryVoltage(), true); setupTouchscreen();
   settingsIo(false);
+  flock_wifi::setMatchSound(s_settings[3]); flock_ble::setMatchSound(s_settings[3]);
   flock_wifi::begin(); flock_ble::begin(); flock_sensors::begin();
   if (s_settings[2]) flock_gps::begin(); else flock_gps::end();
   flock_log::begin(); loadOuis();
@@ -345,6 +345,7 @@ void appLoop() {
   } else if (isButtonPressedEdge(BTN_UP)) {
     if (s_tab == T_SETT) {
       s_settings[s_cursor] = !s_settings[s_cursor]; settingsIo(true);
+      if (s_cursor == 3) { flock_wifi::setMatchSound(s_settings[3]); flock_ble::setMatchSound(s_settings[3]); }
       if (s_cursor == 2) { if (s_settings[2]) flock_gps::begin(); else flock_gps::end(); }
       if (s_cursor == 1 && !s_settings[1]) flock_ble::stopWindow();
       if (s_cursor == 0 && s_phase == P_PROBE) { flock_wifi::stopProbeWindow(); selectPhase(P_PROBE); }
@@ -370,7 +371,7 @@ void appLoop() {
 void exit() {
   if (!s_started) return;
   flock_wifi::stop(); flock_ble::stopWindow(); flock_gps::end();
-  ledcWriteTone(1, 0); s_started = false;
+  s_started = false;
   Serial.println("[flock] closed");
 }
 } // namespace flock_menu

@@ -18,11 +18,11 @@
 #define HACK_LABLE  0x0560
 #define HACK_ACCENT 0x07FF
 
-// Shark theme: neutral instrument surfaces with green focus and amber warnings.
+// Shark theme: monochrome controls, green status accents, amber warnings.
 // Menu resting cells use bg; fg is reserved for controls on feature screens.
 #define SHARK_BG     0x0000
 #define SHARK_FG     BRAND_CARD
-#define SHARK_ICON   BRAND_ACCENT
+#define SHARK_ICON   BRAND_INK
 #define SHARK_TEXT   BRAND_INK
 #define SHARK_LINE   BRAND_LINE
 #define SHARK_LABLE  BRAND_BAND
@@ -30,7 +30,7 @@
 #define SHARK_WARN   BRAND_WARN
 
 UiPalette UI = { SHARK_BG, SHARK_FG, SHARK_ICON, SHARK_TEXT, SHARK_ACCENT,
-                 SHARK_LINE, SHARK_LABLE, SHARK_WARN, SHARK_ICON };
+                 SHARK_LINE, SHARK_LABLE, SHARK_WARN, SHARK_ACCENT };
 
 uint16_t uiUniversalColor() {
   return UI.warn;
@@ -64,8 +64,7 @@ void applyThemeToPalette(Theme t) {
     UI.ok     =  HACK_TEXT;
 
   } else if (t == Theme::Shark) {
-    // Neutral surfaces separate text from the green focus / control color.
-    // The accent preset is ignored so the brand focus color stays consistent.
+    // Neutral focus keeps selected black text readable; color conveys status.
     UI.bg     =  SHARK_BG;
     UI.fg     =  SHARK_FG;
     UI.icon   =  SHARK_ICON;
@@ -74,7 +73,7 @@ void applyThemeToPalette(Theme t) {
     UI.accent =  SHARK_ACCENT;
     UI.lable  =  SHARK_LABLE;
     UI.warn   =  SHARK_WARN;
-    UI.ok     =  SHARK_ICON;
+    UI.ok     =  SHARK_ACCENT;
 
   } else {
     UI.bg     =  BG_Dark;

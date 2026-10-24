@@ -13,6 +13,7 @@
 #include <TFT_eSPI.h>
 #include <Wire.h>
 #include "SettingsStore.h"
+#include "DetectionAlerts.h"
 #include "Touchscreen.h"
 #include "config.h"
 #include "SharkUI.h"
@@ -428,23 +429,22 @@ static void drawPagedFooterButtons() {
     layoutPagedFooterButtons();
     const int y = pagedNavRowY();
     const int rowH = 28;
-    const int keyW = tft.width() / 2 - 9;   // two glass keys with a 6 px gutter
+    const int keyW = tft.width() / 2 - 9;
     tft.fillRect(0, y, tft.width(), rowH, UI_BG);
     tft.setTextFont(2);
     tft.setTextSize(1);
 
-    // Main Menu on the left, page flip on the right; the focused key fills green.
+    // Flat footer keys; their full half-screen touch targets remain unchanged.
     for (int k = 0; k < 2; k++) {
         const bool focus = (s_pagedFooterFocus == k);
         const int kx = (k == 0) ? 6 : tft.width() / 2 + 3;
         if (focus) {
-            tft.fillRoundRect(kx, y, keyW, rowH, 8, UI_ICON);
+            tft.fillRect(kx, y, keyW, rowH, UI_ICON);
         } else {
-            tft.fillRoundRect(kx, y, keyW, rowH, 8, UI_FG);
-            tft.drawRoundRect(kx, y, keyW, rowH, 8, UI_LINE);
+            tft.drawRect(kx, y, keyW, rowH, UI_LINE);
         }
         const unsigned char* icon = (k == 0) ? bitmap_icon_go_back : pagedPageBtnIcon();
-        const char* label = (k == 0) ? "Main Menu" : pagedPageBtnLabel();
+        const char* label = (k == 0) ? "Home" : pagedPageBtnLabel();
         const int groupX = kx + (keyW - (16 + 6 + tft.textWidth(label))) / 2;
         tft.drawBitmap(groupX, y + 6, icon, 16, 16, focus ? TFT_BLACK : UI_ICON);
         tft.setTextColor(focus ? TFT_BLACK : UI_TEXT);
@@ -650,15 +650,16 @@ static void layoutTouchNavBtns() {
   }
 }
 
-static String fitTouchNavLabel(const char* label, int maxWidth) {
-  if (!label || !label[0]) {
+static String fitTouchNavLabel(const char* label, int maxWidth, uint8_t font) {
+  if (!label || !label[0] || maxWidth <= 0) {
     return String();
   }
   String out = label;
-  if (tft.textWidth(out) <= maxWidth) {
+  if (tft.textWidth(out, font) <= maxWidth) {
     return out;
   }
-  while (out.length() > 1 && tft.textWidth(out + "...") > maxWidth) {
+  if (tft.textWidth("...", font) > maxWidth) return String();
+  while (out.length() && tft.textWidth(out + "...", font) > maxWidth) {
     out.remove(out.length() - 1);
   }
   return out + "...";
@@ -680,47 +681,43 @@ static void drawTouchNavBar() {
 
   layoutTouchNavBtns();
 
-  // Darker band so the keys read as raised pills sitting on it.
-  tft.fillRect(0, barY, barW, barH, UI_LABLE);
+  // Five equal touch targets. Flat keys share the same bounds as hit testing.
+  tft.fillRect(0, barY, barW, barH, UI_BG);
   tft.drawFastHLine(0, barY, barW, UI_LINE);
+  tft.setTextFont(1);
+  tft.setTextSize(1);
 
-  const int16_t padX = 4, padY = 6, pr = 8;
+  const int16_t padX = 2, padY = 4;
   for (int i = 0; i < 5; ++i) {
     const auto& b = s_touchNavBtns[i];
-    const bool primary = (i == 2);
-    const bool inactiveSlot = s_touchNavLabelsConfigured && !s_touchNavLabels[i];
+    const bool inactiveSlot = s_touchNavLabelsConfigured &&
+                              (!s_touchNavLabels[i] || !s_touchNavLabels[i][0]);
+    const bool primary = (i == 2) && !inactiveSlot;
     const int16_t px = b.x + padX, py = b.y + padY;
     const int16_t pw = b.w - padX * 2, ph = b.h - padY * 2;
 
-    // Pill surface: the centre (Home/Exit) key fills accent; the rest sit on a
-    // raised dark surface with a hairline border.
+    // Leave unused slots empty: a decorative icon can be mistaken for an action.
+    if (inactiveSlot) continue;
     if (primary) {
-      tft.fillRoundRect(px, py, pw, ph, pr, UI_ICON);
+      tft.fillRect(px, py, pw, ph, UI_ICON);
     } else {
-      tft.fillRoundRect(px, py, pw, ph, pr, UI_FG);
-      tft.drawRoundRect(px, py, pw, ph, pr, UI_LINE);
+      tft.drawRect(px, py, pw, ph, UI_LINE);
     }
 
-    const uint16_t fg = primary ? TFT_BLACK : (inactiveSlot ? UI_DIM_TEXT : UI_TEXT);
-    const uint16_t bg = primary ? UI_ICON : UI_FG;
+    const uint16_t fg = primary ? TFT_BLACK : UI_TEXT;
+    const uint16_t bg = primary ? UI_ICON : UI_BG;
 
     if (s_touchNavLabels[i] && s_touchNavLabels[i][0]) {
       tft.setTextDatum(MC_DATUM);
       tft.setTextColor(fg, bg);
-      const String fit = fitTouchNavLabel(s_touchNavLabels[i], pw - 8);
-      // Size 2 when it fits — readable at arm's length; the primary key is bold.
-      if (primary || tft.textWidth(fit, 2) <= pw - 8) {
-        tft.drawString(fit, b.x + b.w / 2, b.y + b.h / 2, 2);
-      } else {
-        tft.drawString(fit, b.x + b.w / 2, b.y + b.h / 2, 1);
-      }
+      const int labelWidth = pw - 4;
+      const uint8_t font = tft.textWidth(s_touchNavLabels[i], 2) <= labelWidth ? 2 : 1;
+      const String fit = fitTouchNavLabel(s_touchNavLabels[i], labelWidth, font);
+      tft.drawString(fit, b.x + b.w / 2, b.y + b.h / 2, font);
     } else {
       const int ix = b.x + (b.w - kIconSize) / 2;
       const int iy = b.y + (b.h - kIconSize) / 2;
-      const unsigned char* icon = inactiveSlot ? bitmap_icon_dots : kIcons[i];
-      // Arrow glyphs in brand green on the glass keys; ink on the green key.
-      const uint16_t glyph = (primary || inactiveSlot) ? fg : UI_ICON;
-      tft.drawBitmap(ix, iy, icon, kIconSize, kIconSize, glyph);
+      tft.drawBitmap(ix, iy, kIcons[i], kIconSize, kIconSize, fg);
     }
   }
 
@@ -1035,22 +1032,23 @@ const int TILE_H = 61;
 void displayOtherMenuGrid();
 void displayPagedSubmenu();
 
-// Fixed-width labels and compact icons stay readable on the 240 px panel.
+// A compact icon/title line and one detail line, fitted to the real font width.
 static void drawBrandTile(int x, int y, const unsigned char* icon, const char* label,
                           const char* status, bool sel) {
     drawSharkTile(x, y, TILE_W, TILE_H, sel);
     if (icon) {
-        tft.drawBitmap(x + 8, y + 8, icon, 16, 16, sel ? TFT_BLACK : UI_ICON);
+        tft.drawBitmap(x + 8, y + 10, icon, 16, 16, sel ? TFT_BLACK : UI_TEXT);
     }
     tft.setTextFont(2);
     tft.setTextSize(1);
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(sel ? TFT_BLACK : UI_TEXT);
-    tft.drawString(label, x + 8, y + 29);
+    const int titleX = icon ? 30 : 8;
+    tft.drawString(fitTouchNavLabel(label, TILE_W - titleX - 6, 2), x + titleX, y + 10);
     tft.setTextFont(1);
     if (status) {
         tft.setTextColor(sel ? TFT_BLACK : UI_DIM_TEXT);
-        tft.drawString(status, x + 8, y + 47);
+        tft.drawString(fitTouchNavLabel(status, TILE_W - 16, 1), x + 8, y + 38);
     }
     tft.setTextDatum(TL_DATUM);
 }
@@ -1061,25 +1059,33 @@ static void drawBrandRowLabel(int x, int baselineY, const char* text, uint16_t c
     tft.setTextSize(1);
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(color);
-    String label(text);
     const int available = tft.width() - x - 14;
-    if (tft.textWidth(label) > available) {
-        while (label.length() && tft.textWidth(label + "...") > available)
-            label.remove(label.length() - 1);
-        label += "...";
-    }
-    tft.drawString(label, x, baselineY - 15);
+    tft.drawString(fitTouchNavLabel(text, available, 2), x, baselineY - 15);
     tft.setTextFont(1);
     tft.setTextDatum(TL_DATUM);
 }
 
-// One submenu row: flat divider, icon, label and a solid selection.
-static void drawSubmenuRow(int i, int yPos, bool sel) {
-    drawSharkRowRail(yPos, 28, sel);
-    if (active_submenu_icons[i]) {
-        tft.drawBitmap(14, yPos + 6, active_submenu_icons[i], 16, 16, sel ? TFT_BLACK : UI_ICON);
+static int s_submenuWindowStart = 0;
+
+static int submenuRowCapacity() {
+    const int rows = (tft.height() - 60) / 30;
+    return rows > 0 ? rows : 1;
+}
+
+static bool submenuHasOverflow() {
+    return active_submenu_size - 1 > submenuRowCapacity();
+}
+
+static void updateSubmenuWindow() {
+    int windowStart = s_submenuWindowStart;
+    if (current_submenu_index < active_submenu_size - 1) {
+        windowStart = (current_submenu_index / submenuRowCapacity()) * submenuRowCapacity();
     }
-    drawBrandRowLabel(38, yPos + 19, active_submenu_items[i], sel ? TFT_BLACK : UI_TEXT);
+    if (windowStart >= active_submenu_size - 1 || !submenuHasOverflow()) windowStart = 0;
+    if (windowStart != s_submenuWindowStart) {
+        s_submenuWindowStart = windowStart;
+        submenu_initialized = false;
+    }
 }
 
 // Last submenu item ("Back to Main Menu") is pinned to the bottom of the screen.
@@ -1087,7 +1093,47 @@ static int submenuItemY(int index) {
     if (active_submenu_size > 0 && index == active_submenu_size - 1) {
         return tft.height() - 30;
     }
-    return 30 + index * 30;
+    if (index < s_submenuWindowStart ||
+        index >= s_submenuWindowStart + submenuRowCapacity()) return -100;
+    return 30 + (index - s_submenuWindowStart) * 30;
+}
+
+static void drawOverflowSubmenuFooter(bool backSelected) {
+    const int y = tft.height() - 30;
+    const int mid = tft.width() / 2;
+    const int keyW = mid - 9;
+    tft.fillRect(0, y, tft.width(), 30, UI_BG);
+    if (backSelected) tft.fillRect(6, y, keyW, 28, UI_ICON);
+    else tft.drawRect(6, y, keyW, 28, UI_LINE);
+    tft.drawRect(mid + 3, y, keyW, 28, UI_LINE);
+    tft.setTextSize(1);
+    tft.setTextFont(2);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(backSelected ? TFT_BLACK : UI_TEXT);
+    tft.drawString("Home", 6 + keyW / 2, y + 14);
+    const int pages = (active_submenu_size - 2) / submenuRowCapacity() + 1;
+    const String page = String(s_submenuWindowStart / submenuRowCapacity() + 1) +
+                        "/" + String(pages) + "  >";
+    tft.setTextColor(UI_TEXT);
+    tft.drawString(page, mid + 3 + keyW / 2, y + 14);
+    tft.setTextDatum(TL_DATUM);
+}
+
+// One submenu row: flat divider, icon, label and a solid selection.
+static void drawSubmenuRow(int i, int yPos, bool sel) {
+    // Paged WiFi/BLE lists have synthetic footer indices, not item entries.
+    if (i < 0 || i >= active_submenu_size || !active_submenu_items || !active_submenu_icons) return;
+    if (current_menu_index != 0 && current_menu_index != 4 &&
+        submenuHasOverflow() && i == active_submenu_size - 1) {
+        drawOverflowSubmenuFooter(sel);
+        return;
+    }
+    if (yPos < 20 || yPos + 28 > tft.height()) return;
+    drawSharkRowRail(yPos, 28, sel);
+    if (active_submenu_icons[i]) {
+        tft.drawBitmap(14, yPos + 6, active_submenu_icons[i], 16, 16, sel ? TFT_BLACK : UI_ICON);
+    }
+    drawBrandRowLabel(38, yPos + 19, active_submenu_items[i], sel ? TFT_BLACK : UI_TEXT);
 }
 
 void displaySubmenu() {
@@ -1105,6 +1151,9 @@ void displaySubmenu() {
 
     menu_initialized = false;
     last_menu_index = -1;
+
+    // Reveal keyboard focus and keep touch targets aligned with visible rows.
+    updateSubmenuWindow();
 
     tft.setTextFont(2);
     tft.setTextSize(1);
@@ -1184,7 +1233,7 @@ void displayPagedSubmenu() {
         Serial.printf("[vm:submenu] sel=%d %s\n",
                       current_submenu_index,
                       (current_submenu_index >= 0 &&
-                       current_submenu_index < active_submenu_size)
+                       current_submenu_index < featureCount)
                           ? active_submenu_items[current_submenu_index]
                           : "(footer)");
 #endif
@@ -1245,17 +1294,17 @@ static void drawHomeFooter() {
     tft.fillRect(0, y, tft.width(), 28, UI_BG);
     tft.drawFastHLine(0, y, tft.width(), UI_LINE);
     tft.drawBitmap(8, y + 7, sdCardPresent ? bitmap_icon_sdcard : bitmap_icon_nullsdcard,
-                   16, 16, sdCardPresent ? UI_ICON : TFT_RED);
+                   16, 16, sdCardPresent ? UI_TEXT : UI_DIM_TEXT);
     tft.setTextFont(1);
     tft.setTextDatum(ML_DATUM);
     tft.setTextColor(UI_TEXT, UI_BG);
     tft.drawString(sdCardPresent ? "SD" : "NO SD", 28, y + 15);
     const float t = readInternalTemperature();
     // 53.33 is the sensor's "no reading" value; don't show it as a temperature.
-    tft.drawString(fabs(t - 53.33f) < 0.51f ? String("--C") : String((int)t) + "C", 76, y + 15);
+    tft.drawString(!isfinite(t) || fabs(t - 53.33f) < 0.51f ? String("--C") : String((int)t) + "C", 76, y + 15);
     tft.setTextDatum(MR_DATUM);
     tft.setTextColor(UI_DIM_TEXT, UI_BG);
-    tft.drawString("TAP TO OPEN", tft.width() - 8, y + 15);
+    tft.drawString("Tap / Select", tft.width() - 8, y + 15);
     tft.setTextDatum(TL_DATUM);
 }
 
@@ -1299,7 +1348,15 @@ void displayMenu() {
     drawStatusBar(currentBatteryVoltage, true, true);
 }
 
+static bool readSubmenuTouchPress(int& x, int& y, bool& held) {
+    const bool down = readTouchXY(x, y);
+    const bool pressed = down && !held;
+    held = down;
+    return pressed;
+}
+
 void handleWiFiSubmenuButtons() {
+    static bool touchHeld = false;
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         last_interaction_time = millis();
@@ -1829,7 +1886,7 @@ void handleWiFiSubmenuButtons() {
 
     if (!feature_active) {
         int x, y;
-        if (!readTouchXY(x, y)) { return; }
+        if (!readSubmenuTouchPress(x, y, touchHeld)) { return; }
         delay(10);
 
         layoutPagedFooterButtons();
@@ -2352,6 +2409,7 @@ void handleWiFiSubmenuButtons() {
 }
 
 void handleBluetoothSubmenuButtons() {
+    static bool touchHeld = false;
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         last_interaction_time = millis();
@@ -2718,7 +2776,7 @@ void handleBluetoothSubmenuButtons() {
 
     if (!feature_active) {
         int x, y;
-        if (!readTouchXY(x, y)) { return; }
+        if (!readSubmenuTouchPress(x, y, touchHeld)) { return; }
         delay(10);
 
         layoutPagedFooterButtons();
@@ -4130,6 +4188,7 @@ static void launchToolsFeature(int idx) {
 }
 
 void handleToolsSubmenuButtons() {
+    static bool touchHeld = false;
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         last_interaction_time = millis();
@@ -4164,7 +4223,18 @@ void handleToolsSubmenuButtons() {
 
     if (!feature_active) {
         int x, y;
-        if (!readTouchXY(x, y)) {
+        if (!readSubmenuTouchPress(x, y, touchHeld)) {
+            return;
+        }
+
+        if (submenuHasOverflow() && x >= tft.width() / 2 && x < tft.width() &&
+            y >= tft.height() - 30 && y < tft.height()) {
+            int next = s_submenuWindowStart + submenuRowCapacity();
+            if (next >= active_submenu_size - 1) next = 0;
+            current_submenu_index = next;
+            last_interaction_time = millis();
+            displaySubmenu();
+            delay(200);
             return;
         }
 
@@ -5445,7 +5515,8 @@ void setup() {
 #if BOARD_HAS_ESP32S3
   settingsLoad();
 #else
-  // Avoid SD mount via settingsLoad on v1 (same crash as step 3).
+  // Keep audio preferences independent of the deferred v1 SD mount.
+  settingsLoadSound();
   settingsApplyBoardTouchDefaults();
   Serial.println("[boot] settings defaults (v1, SD deferred)");
 #endif
@@ -5495,18 +5566,7 @@ void setup() {
 
   setupTouchscreen();
     
- /*蜂鸣器提示*/
-#if !DIV_VM_BUILD
-  ledcSetup(1, 1500, 8);//channel_1，KHz，8bit
-  ledcAttachPin(BUZZER_PIN, 1);//BUZZER_PIN,channel_1
-#endif
-  ledcWrite(1, 125);//50%
-  delay(100);
-#if !DIV_VM_BUILD
-  ledcSetup(1, 2000, 8);//channel_1，KHz，8bit
-#endif
-  delay(100);
-  ledcWrite(1, 0);//OFF
+  DetectionAlerts::begin(settings().detectionSound);
 
   /*检查IP5306是否存在*/
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -5574,15 +5634,15 @@ static void serialConsoleTask(void*) {
       int idx = -1;
       uint16_t dur = 300;
       switch (cmd) {
-        case 'U': dur = 260;  // fall through: deterministic single step
+        case 'U': dur = 160;  // fall through: deterministic single step
         case 'u': idx = touchNavIndexForPin(BTN_UP); break;
-        case 'D': dur = 260;
+        case 'D': dur = 160;
         case 'd': idx = touchNavIndexForPin(BTN_DOWN); break;
-        case 'L': dur = 260;
+        case 'L': dur = 160;
         case 'l': idx = touchNavIndexForPin(BTN_LEFT); break;
-        case 'R': dur = 260;
+        case 'R': dur = 160;
         case 'r': idx = touchNavIndexForPin(BTN_RIGHT); break;
-        case 'K': dur = 260;
+        case 'K': dur = 160;
         case 'k': idx = touchNavIndexForPin(BTN_SELECT); break;
         case 's':
           Serial.printf("[mcp] v=%s menu=%d(%s) sub=%d(%s) feature=%d theme=%d\n",
@@ -5592,9 +5652,14 @@ static void serialConsoleTask(void*) {
                             ? menu_items[current_menu_index] : "?",
                         current_submenu_index,
                         (active_submenu_items && current_submenu_index >= 0 &&
-                         current_submenu_index < active_submenu_size)
+                         current_submenu_index < ((current_menu_index == 0 || current_menu_index == 4)
+                             ? pagedFeatureCount() : active_submenu_size))
                             ? active_submenu_items[current_submenu_index] : "-",
                         feature_active ? 1 : 0, (int)settings().theme);
+          break;
+        case 'a': DetectionAlerts::printStatus(); break;
+        case 't':
+          Serial.println(DetectionAlerts::preview() ? "[sound] test queued" : "[sound] muted or unavailable");
           break;
         case 'b': {
           Wire.beginTransmission(IP5306_ADDR);
@@ -5609,7 +5674,7 @@ static void serialConsoleTask(void*) {
         }
         default:
           if (cmd == 'h' || cmd == '\n' || cmd == '\r') {
-            Serial.println("[mcp] cmds: u d l r k = tap, s = state, b = battery");
+            Serial.println("[mcp] cmds: u d l r k = tap, s = state, b = battery, a = sound status, t = test sound");
           }
           break;
       }

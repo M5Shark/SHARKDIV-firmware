@@ -1,4 +1,5 @@
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include <SD.h>
 #include "SettingsStore.h"
 #include "utils.h"
@@ -87,8 +88,29 @@ static bool ensureDir(const char* dirPath) {
   return true;
 }
 
+bool settingsSetDetectionSound(bool enabled) {
+  g_settings.detectionSound = enabled;
+  Preferences prefs;
+  if (!prefs.begin("shark_audio", false)) return false;
+  const bool ok = prefs.putBool("enabled", enabled) == 1;
+  prefs.end();
+  return ok;
+}
+
+static bool soundStored = false;
+void settingsLoadSound() {
+  soundStored = false;
+  Preferences prefs;
+  if (prefs.begin("shark_audio", true)) {
+    soundStored = prefs.isKey("enabled");
+    g_settings.detectionSound = prefs.getBool("enabled", true);
+    prefs.end();
+  }
+}
+
 bool settingsLoad() {
   settingsApplyBoardTouchDefaults();
+  settingsLoadSound();
   sdRetryMount();
   if (!mountSD()) return false;
   if (!SD.exists(SETTINGS_PATH)) return true;
@@ -103,6 +125,7 @@ bool settingsLoad() {
 
   auto& s = g_settings;
   s.brightness      = doc["brightness"]      | s.brightness;
+  if (s.brightness < 16) s.brightness = 16;
   {
     // Accept the stored theme, mapping legacy values safely into 0-3.
     uint8_t t = doc["theme"] | (uint8_t)s.theme;
@@ -117,6 +140,7 @@ bool settingsLoad() {
   }
   s.accentColor     = accentPresetClamp(doc["accentColor"] | s.accentColor);
   s.neopixelEnabled = doc["neopixelEnabled"] | s.neopixelEnabled;
+  if (!soundStored) s.detectionSound = doc["detectionSound"] | s.detectionSound;
 
   s.autoWifiScan    = doc["autoWifiScan"]    | s.autoWifiScan;
   s.autoBleScan     = doc["autoBleScan"]     | s.autoBleScan;
@@ -164,6 +188,7 @@ bool settingsSave() {
   doc["theme"]           = (uint8_t)s.theme;
   doc["accentColor"]     = s.accentColor;
   doc["neopixelEnabled"] = s.neopixelEnabled;
+  doc["detectionSound"] = s.detectionSound;
 
   doc["autoWifiScan"]    = s.autoWifiScan;
   doc["autoBleScan"]     = s.autoBleScan;

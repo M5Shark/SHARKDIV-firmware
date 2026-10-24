@@ -17,6 +17,7 @@ struct Hit {
 };
 
 void begin();
+void setMatchSound(bool enabled); // per-tool mute; global mute also applies
 void addOui(const char* oui);   // extend OUI list (e.g. from SD)
 // One async scan pass; call poll() until it returns true.
 bool startScan();

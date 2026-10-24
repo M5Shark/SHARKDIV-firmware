@@ -97,21 +97,29 @@ std::mutex* bgBleScanMutex = &mutex;
 std::atomic<bool> feature_active{false};
 bool in_sub_menu = false, fgBleScanInProgress = false;
 bool bgHasResults = false, bgBleScanRunning = false, isScanning = false;
+int bgLastCount = 0;
 bool bleInitDone = false, initSucceeds = true;
 uint32_t bgBootMs = 1, bgLastScanMs = 0;
 constexpr uint32_t BG_BOOT_GRACE_MS = 6000, BG_BLE_SCAN_INTERVAL_MS = 15000;
 struct Settings { bool autoBleScan = true; } config;
 Settings& settings() { return config; }
 Barrier scanStart;
-struct Results { int getCount() const { return 2; } } bleResults;
+struct BLEScanResults {
+  int count = 0;
+  BLEScanResults() = default;
+  explicit BLEScanResults(int n) : count(n) {}
+  int getCount() const { return count; }
+};
+BLEScanResults bleResults;
 std::atomic<int> stops{0}, starts{0};
 struct Scan {
-  Results start(int, bool) { ++starts; scanStart.block(); return {}; }
+  BLEScanResults start(int, bool) { ++starts; scanStart.block(); return BLEScanResults(2); }
   void stop() { ++stops; }
 } scanner;
 Scan* bleScan = nullptr;
-void ensureBleInit() {
+bool ensureBleInit() {
   if (initSucceeds) { bleScan = &scanner; bleInitDone = true; }
+  return initSucceeds;
 }
 '''
 checks = r'''
@@ -153,6 +161,9 @@ int main() {
     scanStart.release();
     bg.join(); ui.join();
     assert(acquired && !bgBleScanRunning && !isScanning);
+    // The completed background scan held two borrowed device pointers. The UI
+    // must discard that view before another tool deletes the shared results.
+    assert(!bgHasResults && bgLastCount == 0 && bleResults.getCount() == 0);
     oneIteration(bgBleScanTask);
     assert(stops == 0 && starts == 1);
     // A failed stack initialization must never dereference a null scan object.
@@ -160,6 +171,11 @@ int main() {
     bleInitDone = false; bleScan = nullptr;
     oneIteration(bgBleScanTask);
     assert(starts == 1);
+    // Cache handoff also works before the background task/mutex is created.
+    bgBleScanMutex = nullptr;
+    bgHasResults = true; bgLastCount = 2; bleResults = BLEScanResults(2);
+    waitForBackgroundScanner();
+    assert(!bgHasResults && bgLastCount == 0 && bleResults.getCount() == 0);
   }
   puts("Background radio handoff tests passed");
 }
@@ -168,7 +184,7 @@ source = common + wifi_fixture
 for signature in ("static void stopBgWifiScanIfRunning()", "static void bgWifiScanTask(void* )", "void waitForBackgroundScanner()"):
     source += function(wifi, signature) + "\n"
 source += "}\n" + ble_fixture
-for signature in ("static void stopBgBleScanIfRunning()", "static void bgBleScanTask(void* )", "void waitForBackgroundScanner()"):
+for signature in ("static void invalidateBleCache()", "static void stopBgBleScanIfRunning()", "static void bgBleScanTask(void* )", "void waitForBackgroundScanner()"):
     source += function(ble, signature) + "\n"
 source += "}\n" + checks
 with tempfile.TemporaryDirectory(prefix="sharkdiv-radio-handoff-") as directory:

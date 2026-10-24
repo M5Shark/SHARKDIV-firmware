@@ -1,4 +1,5 @@
 // Passive BLE evidence receiver; no connections, GATT reads, or scan requests.
+#include "DetectionAlerts.h"
 #include "flock_ble.h"
 #include "flock_config.h"
 #include "config.h"
@@ -16,6 +17,13 @@ static uint32_t s_advertisements = 0;
 static int s_error = 0;
 static BLEScan* s_scan = nullptr;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_matchSound = true;
+
+void setMatchSound(bool enabled) {
+  portENTER_CRITICAL(&s_lock);
+  s_matchSound = enabled;
+  portEXIT_CRITICAL(&s_lock);
+}
 
 static void upsert(const std::string& name, const std::string& mac, int rssi, uint8_t evidence) {
   if (rssi < flk::kRssiPossible) return;
@@ -46,7 +54,10 @@ static void upsert(const std::string& name, const std::string& mac, int rssi, ui
   hit.rssi = (int8_t)rssi;
   hit.evidence |= evidence;
   hit.lastMs = now;
+  const bool sound = s_matchSound;
   portEXIT_CRITICAL(&s_lock);
+  if (sound) DetectionAlerts::notify(DetectionAlerts::Source::Flock,
+                                     DetectionAlerts::hash(reinterpret_cast<const uint8_t*>(mac.data()), mac.size()));
 }
 
 class Cb : public BLEAdvertisedDeviceCallbacks {
@@ -89,6 +100,7 @@ bool startWindow() {
     result.scan = scan;
     if (!scan || !scan->stop()) return;
     result.acquired = true;
+    BLEDevice::getAdvertising()->stop();
     scan->setAdvertisedDeviceCallbacks(nullptr);
     scan->clearResults();
     scan->setAdvertisedDeviceCallbacks(&s_cb, true);

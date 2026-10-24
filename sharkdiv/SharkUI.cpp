@@ -1,6 +1,5 @@
-// SHARKDIV display chrome: flat instrument cells and a short static boot mark.
+// SHARKDIV display chrome: flat instrument cells and a brief startup label.
 #include "SharkUI.h"
-#include "SharkLogo.h"
 #include "config.h"
 #include "SettingsStore.h"
 
@@ -45,27 +44,22 @@ void playSharkBoot() {
   applyThemeToPalette(settings().theme);
   tft.fillScreen(UI.bg);
 
-  // Draw directly to the panel: no full-screen allocation, flashing frames,
-  // simulated progress or waiting for a multi-second animation to finish.
+  // A plain product/version label keeps startup quick and readable.
   const int16_t centerX = tft.width() / 2;
-  const int16_t top = (tft.height() - 218) / 2;
-  tft.drawBitmap(centerX - SHARK_LOGO_W / 2, top, shark_logo_bitmap,
-                 SHARK_LOGO_W, SHARK_LOGO_H, UI.icon);
+  const int16_t baseline = tft.height() / 2;
 
   tft.setTextSize(1);
   tft.setFreeFont(&FreeSansBold12pt7b);
   tft.setTextDatum(C_BASELINE);
   tft.setTextColor(UI.text);
-  tft.drawString(ESP32DIV_NAME, centerX, top + 170);
+  tft.drawString(ESP32DIV_NAME, centerX, baseline);
 
   tft.setTextFont(1);
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(UI_DIM_TEXT);
-  tft.drawString("RADIO / SIGNAL / TOOLS", centerX, top + 182);
-  tft.drawFastHLine(24, top + 199, tft.width() - 48, UI.line);
-  tft.drawString(ESP32DIV_VERSION, centerX, top + 208);
+  tft.drawString(ESP32DIV_VERSION, centerX, baseline + 14);
   tft.setTextDatum(TL_DATUM);
 
   // Brief identity cue; hardware initialization continues after this function.
-  delay(400);
+  delay(150);
 }

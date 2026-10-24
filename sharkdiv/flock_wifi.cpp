@@ -1,4 +1,5 @@
 // Receive-only Wi-Fi AP and probe observations. Signatures are candidate evidence.
+#include "DetectionAlerts.h"
 #include "flock_wifi.h"
 #include "flock_config.h"
 #include "FlockSignatures.h"
@@ -11,6 +12,13 @@ namespace flock_wifi {
 static Hit s_hits[kMaxHits];
 static int s_hitCount = 0;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_matchSound = true;
+
+void setMatchSound(bool enabled) {
+  portENTER_CRITICAL(&s_lock);
+  s_matchSound = enabled;
+  portEXIT_CRITICAL(&s_lock);
+}
 static bool s_scanning = false;
 static bool s_probing = false;
 static bool s_acceptProbes = false;
@@ -80,7 +88,10 @@ static void upsert(const uint8_t* mac, const char* ssid, int8_t rssi,
   h.byProbe |= byProbe;
   h.byFingerprint |= byFingerprint;
   if (ssid && ssid[0]) { strncpy(h.ssid, ssid, 32); h.ssid[32] = 0; }
+  const bool sound = s_matchSound;
   portEXIT_CRITICAL(&s_lock);
+  if (sound) DetectionAlerts::notify(DetectionAlerts::Source::Flock,
+                                     DetectionAlerts::hash(mac, 6));
 }
 
 static void pruneLocked(uint32_t now) {

@@ -1,3 +1,4 @@
+#include "DetectionAlerts.h"
 #include <Arduino.h>
 #include <IRrecv.h>
 #include <IRremoteESP8266.h>
@@ -1162,6 +1163,9 @@ static void pollCapture() {
     s_hasCapture = true;
 
     const uint32_t newHash = stableHash();
+    if (!s_autoTx && (!hadCapture || newHash != s_lastStableHash)) {
+      DetectionAlerts::notify(DetectionAlerts::Source::Infrared, newHash);
+    }
 
     if (!hadCapture) {
       s_contentDirty = true;

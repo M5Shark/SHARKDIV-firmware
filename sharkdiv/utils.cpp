@@ -13,6 +13,7 @@
 #include "shared.h"
 #include "SharkUI.h"
 #include "utils.h"
+#include "DetectionAlerts.h"
 
 bool has_ip5306 = false;
 
@@ -350,20 +351,28 @@ void drawButtonRect(int x, int y, int w, int h,
                     bool disabled,
                     uint8_t font) {
   if (!label) label = "";
-  int r = h / 2;
-  if (r > 6) r = 6;
-  if (r < 0) r = 0;
   uint16_t fill = btnFill(style, pressed, disabled);
   uint16_t edge = btnBorder(style, disabled);
   uint16_t txt  = btnText(style, disabled);
 
-  tft.fillRoundRect(x, y, w, h, r, fill);
-  tft.drawRoundRect(x, y, w, h, r, edge);
+  tft.fillRect(x, y, w, h, fill);
+  tft.drawRect(x, y, w, h, edge);
 
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(txt, fill);
 
-  tft.drawString(label, x + w/2, y + h/2, font);
+  // Feature callers may leave a different font/scale active. Measure exactly
+  // what will be drawn and keep long labels inside their touch target.
+  tft.setTextSize(1);
+  tft.setTextFont(font);
+  String fitted(label);
+  if (tft.textWidth(fitted, font) > w - 8) {
+    font = 1; tft.setTextFont(font);
+    while (fitted.length() && tft.textWidth(fitted + "~", font) > w - 8)
+      fitted.remove(fitted.length() - 1);
+    fitted += "~";
+  }
+  tft.drawString(fitted, x + w/2, y + h/2, font);
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextFont(1);
@@ -1563,649 +1572,138 @@ void terminalLoop() {
 }
 
 namespace AppSettingsUI {
+static constexpr int top = 46, rowH = 29, count = 7;
+static const char* labels[count] = {
+  "Brightness", "Theme", "Accent", "Status LED", "Background scan", "Detection sound", "Test sound"
+};
+static int selected = 0;
+static bool dirty = false, redraw = false, touchArmed = false, opening = true;
+static bool wasDown[5] = {};
+static char message[40] = "Tap a row or use the keys";
 
-static const int SCREEN_W = 240;
-static const int BAR_H    = 22;
-static const int TITLE_Y  = BAR_H + 4;
-static const int TITLE_H  = 16;
-static const int ROW_H    = 32;
-static const int GAP_Y    = 4;
-static const int PAD_X    = 12;
-static const int LABEL_W  = 92;
-static const int RADIUS   = 8;
-
-static inline int rowY(int i) { return TITLE_Y + TITLE_H + 6 + i * (ROW_H + GAP_Y); }
-
-struct Rect { int x,y,w,h; };
-static inline Rect makeRect(int x,int y,int w,int h){ return {x,y,w,h}; }
-static inline void fillRound(const Rect& r, uint16_t c){ tft.fillRoundRect(r.x,r.y,r.w,r.h,RADIUS,c); }
-static inline void drawRound(const Rect& r, uint16_t c){ tft.drawRoundRect(r.x,r.y,r.w,r.h,RADIUS,c); }
-
-static uint16_t cardBG, cardEdge, textDim, textStrong, accentSoft, btnBg, btnFg, btnStroke;
-
-static uint16_t blend565(uint16_t a, uint16_t b, uint8_t k ) {
-  uint32_t rb = (((a & 0xF81F) * (255-k)) + ((b & 0xF81F) * k)) >> 8;
-  uint32_t g  = (((a & 0x07E0) * (255-k)) + ((b & 0x07E0) * k)) >> 8;
-  return (rb & 0xF81F) | (g & 0x07E0);
-}
-static void buildPalette() {
-
-  cardBG     = UI_FG;
-  cardEdge   = UI_LINE;
-  textDim    = UI_TEXT;
-  textStrong = UI_TEXT;
-  accentSoft = UI_ICON;
-
-  btnBg      = UI_BG;
-  btnFg      = UI_FG;
-  btnStroke  = UI_LINE;
-}
-
-static int  sel = 0;
-static bool dirtySettings = false;
-static bool uiDirty = false;
-
-static const char* items[] = {"Brightness", "Theme", "Accent", "NeoPixel", "Auto Scan"};
-static const int N = sizeof(items)/sizeof(items[0]);
-
-static uint8_t  last_brightness;
-static Theme    last_theme;
-static uint8_t  last_accent;
-static bool     last_neopixel;
-static bool     last_autoScan;
-static int      last_sel;
-
-static bool dragging = false;
-
-static uint32_t lastChangeMs = 0;
-
-static Rect rowRect(int i) { return makeRect(PAD_X, rowY(i), SCREEN_W - PAD_X*2, ROW_H); }
-
-static void setTitleFont() { tft.setTextFont(2); }
-static void setLabelFont() { tft.setTextFont(2); }
-
-static void drawTitle() {
-  setTitleFont();
-  tft.setTextColor(textStrong, UI.bg);
-  tft.setCursor(PAD_X, TITLE_Y);
-  tft.print("Settings");
-}
-
-static void drawCardStatic(int i, bool selected) {
-  Rect r = rowRect(i);
-
-  tft.fillRect(0, r.y, SCREEN_W, r.h, UI_BG);
-
-  if (selected) {
-    tft.fillRect(0, r.y, 3, r.h, UI.accent);
-  }
-
-  setLabelFont();
-  tft.setTextColor(textDim, UI_BG);
-  int ty = r.y + (r.h/2 - 6);
-  tft.setCursor(r.x, ty);
-  tft.print(items[i]);
-
-  tft.drawLine(PAD_X, r.y + r.h - 1, SCREEN_W - PAD_X, r.y + r.h - 1, UI_LINE);
-}
-
-static void wipeBrightnessWidgetArea() {
-  Rect r = rowRect(0);
-  tft.fillRect(r.x + LABEL_W, r.y + 2, r.w - LABEL_W - 6, r.h - 4, UI_BG);
-}
-static void wipeThemeWidgetArea() {
-  Rect r = rowRect(1);
-  tft.fillRect(r.x + LABEL_W, r.y + 2, r.w - LABEL_W - 6, r.h - 4, UI_BG);
-}
-static void wipeAccentWidgetArea() {
-  Rect r = rowRect(2);
-  tft.fillRect(r.x + LABEL_W, r.y + 2, r.w - LABEL_W - 6, r.h - 4, UI_BG);
-}
-static void wipeSwitchWidgetArea(int row) {
-  Rect r = rowRect(row);
-  tft.fillRect(r.x + LABEL_W, r.y + 2, r.w - LABEL_W - 6, r.h - 4, UI_BG);
-}
-
-static Rect rBrightTrack(){
-  Rect r = rowRect(0);
-  int left  = r.x + LABEL_W + 6;
-  int right = r.x + r.w - 44;
-  int w     = max(70, right - left);
-  return makeRect(left, r.y + (r.h/2 - 8), w, 16);
-}
-static Rect rBrightKnob(uint8_t v) {
-  Rect tr = rBrightTrack();
-  int d = 18;
-  int x = tr.x + (int)((uint32_t)v * (tr.w - d) / 255u);
-  int y = tr.y + tr.h/2 - d/2;
-  return makeRect(x, y, d, d);
-}
-static void drawBrightnessWidget(uint8_t v, bool selected) {
-  tft.startWrite();
-  wipeBrightnessWidgetArea();
-
-  Rect tr = rBrightTrack();
-
-  tft.fillRoundRect(tr.x, tr.y, tr.w, tr.h, tr.h/2, UI_BG);
-  tft.drawRoundRect(tr.x, tr.y, tr.w, tr.h, tr.h/2, cardEdge);
-
-  int fw = (int)((uint32_t)v * tr.w / 255u);
-  tft.fillRoundRect(tr.x, tr.y, fw+2, tr.h, tr.h/2, UI_ICON);
-
-  Rect kb = rBrightKnob(v);
-  tft.fillCircle(kb.x + kb.w/2, kb.y + kb.h/2, kb.w/2, UI_FG);
-  tft.drawCircle(kb.x + kb.w/2, kb.y + kb.h/2, kb.w/2, selected ? UI_ICON : UI_FG);
-
-  int bx = tr.x + tr.w + 6, by = tr.y - 2, bw = 34, bh = tr.h + 4;
-  tft.fillRoundRect(bx+1, by+1, bw, bh, 4, blend565(UI_BG, UI_FG, 28));
-  tft.fillRoundRect(bx,   by,   bw, bh, 4, cardBG);
-  tft.drawRoundRect(bx,   by,   bw, bh, 4, cardEdge);
-  setLabelFont();
-  tft.setTextColor(textStrong, cardBG);
-  char buf[8]; snprintf(buf,sizeof(buf),"%3u", v);
-  tft.setCursor(bx+5, by+2);
-  tft.print(buf);
-
-  tft.endWrite();
-}
-static void drawBrightness(uint8_t v, bool selected) {
-  drawCardStatic(0, selected);
-  drawBrightnessWidget(v, selected);
-}
-
-
-static const char* themeDisplayName(Theme th) {
-  switch (th) {
-    case Theme::Light:  return "Light";
-    case Theme::Hacker: return "Hacker";
-    case Theme::Shark:  return "Shark";
-    default:            return "Dark";
+static const char* themeName(Theme theme) {
+  switch (theme) {
+    case Theme::Light: return "Light";
+    case Theme::Hacker: return "Green";
+    case Theme::Shark: return "Mono";
+    default: return "Dark";
   }
 }
-
-static void drawThemeWidget(Theme th, bool ) {
-
-  tft.startWrite();
-  wipeThemeWidgetArea();
-
-  Rect r = rowRect(1);
-  int ty    = r.y + (r.h / 2 - 6);
-  int cx    = r.x + r.w / 2;
-
-  setLabelFont();
-
-  // Cycle widget: "< Dark >" centered; LEFT/RIGHT buttons or a tap on the
-  // row step through the four themes.
-  const char* name = themeDisplayName(th);
-  String label = String("< ") + name + " >";
-  int wN = (int)tft.textWidth(label);
-
-  tft.setTextColor(textStrong, UI_BG);
-  tft.setCursor(cx - wN / 2, ty);
-  tft.print(label);
-
-  tft.setTextColor(UI_DIM_TEXT, UI_BG);
-  String idx = String((uint8_t)th + 1) + "/" + String(kThemeCount);
-  tft.setCursor(r.x + r.w - (int)tft.textWidth(idx) - 6, ty);
-  tft.print(idx);
-
-  tft.endWrite();
+static void hint(const char* text) {
+  snprintf(message, sizeof(message), "%s", text);
+  redraw = true;
 }
-static void drawTheme(Theme th, bool selected) {
-  drawCardStatic(1, selected);
-  drawThemeWidget(th, selected);
-}
-
-static Rect rAccentSwatch() {
-  Rect r = rowRect(2);
-  int sw = 18;
-  int sx = r.x + r.w - sw - 6;
-  int sy = r.y + (r.h - sw) / 2;
-  return makeRect(sx, sy, sw, sw);
-}
-static void drawAccentWidget(uint8_t preset, bool ) {
-  tft.startWrite();
-  wipeAccentWidgetArea();
-
-  Rect r = rowRect(2);
-  int right = r.x + r.w - 6;
-  int ty = r.y + (r.h / 2 - 6);
-
-  setLabelFont();
-  const char* name = accentPresetName(preset);
-  int nameW = (int)tft.textWidth(name);
-  Rect sw = rAccentSwatch();
-  int nameX = sw.x - 8 - nameW;
-
-  tft.setTextColor(textStrong, UI_BG);
-  tft.setCursor(nameX, ty);
-  tft.print(name);
-
-  tft.fillRoundRect(sw.x, sw.y, sw.w, sw.h, 4, accentColor565(preset));
-  tft.drawRoundRect(sw.x, sw.y, sw.w, sw.h, 4, cardEdge);
-
-  tft.endWrite();
-}
-static void drawAccent(uint8_t preset, bool selected) {
-  drawCardStatic(2, selected);
-  drawAccentWidget(preset, selected);
-}
-
-static Rect rSwitchTrack(int row){
-  Rect r = rowRect(row);
-  const int w = 34;
-  const int h = 14;
-  int x = r.x + r.w - w - 10;
-  int y = r.y + (r.h - h) / 2;
-  return makeRect(x, y, w, h);
-}
-static Rect rSwitchKnob(bool on, int row) {
-  Rect tr = rSwitchTrack(row);
-  int d = tr.h - 4;
-  int x = on ? (tr.x + tr.w - d - 2)
-             : (tr.x + 2);
-  int y = tr.y + (tr.h - d) / 2;
-  return makeRect(x, y, d, d);
-}
-static void drawSwitchWidgetRow(bool on, bool , int row) {
-  tft.startWrite();
-  wipeSwitchWidgetArea(row);
-
-  Rect tr = rSwitchTrack(row);
-
-  tft.fillRoundRect(tr.x, tr.y, tr.w, tr.h, tr.h/2, UI_BG);
-  tft.drawRoundRect(tr.x, tr.y, tr.w, tr.h, tr.h/2, cardEdge);
-
-  if (on) {
-    tft.fillRoundRect(tr.x+1, tr.y+1, tr.w-2, tr.h-2, tr.h/2, UI_ICON);
-  }
-
-  Rect kb = rSwitchKnob(on, row);
-  uint16_t knobBody  = UI_FG;
-  uint16_t knobEdge  = on ? UI.accent : UI_FG;
-  tft.fillCircle(kb.x+kb.w/2, kb.y+kb.h/2, kb.w/2, knobBody);
-  tft.drawCircle(kb.x+kb.w/2, kb.y+kb.h/2, kb.w/2, knobEdge);
-
-  setLabelFont();
-  tft.setTextColor(textStrong, UI_BG);
-  int labelX = tr.x - 26;
-  int labelY = tr.y + 1;
-  tft.setCursor(labelX, labelY);
-  tft.print(on ? "ON" : "OFF");
-
-  tft.endWrite();
-}
-static void drawSwitchRow(bool on, bool selected, int row) {
-  drawCardStatic(row, selected);
-  drawSwitchWidgetRow(on, selected, row);
-}
-
-static void drawNeoPixel(bool on, bool selected) { drawSwitchRow(on, selected, 3); }
-static void drawAutoScan(bool on, bool selected) { drawSwitchRow(on, selected, 4); }
-
-static Rect backRect(){
-  int h = tft.height();
-  int bwTotal = SCREEN_W - PAD_X*2;
-  int bh = 24;
-  int bx = PAD_X;
-  int by = h - bh - 8;
-  const int gap = 8;
-  int bw = (bwTotal - gap) / 2;
-  return makeRect(bx, by, bw, bh);
-}
-static Rect saveRect(){
-  Rect b = backRect();
-  const int gap = 8;
-  return makeRect(b.x + b.w + gap, b.y, b.w, b.h);
-}
-static void drawFooterButton(const Rect& b, const char* label, uint16_t body, uint16_t edge){
-
-  FeatureUI::ButtonStyle style =
-    (body == UI.accent) ? FeatureUI::ButtonStyle::Primary : FeatureUI::ButtonStyle::Secondary;
-  FeatureUI::drawButtonRect(b.x, b.y, b.w, b.h, label, style);
-}
-static void footerToast(const char* msg, uint16_t color){
-  Rect b = backRect();
-  int y = b.y - 18;
-  int h = 14;
-  tft.fillRect(PAD_X, y, SCREEN_W - PAD_X*2, h, UI_BG);
-  tft.setTextColor(color, UI_BG);
-  tft.setTextFont(1);
-  tft.setTextSize(1);
-  tft.setCursor(PAD_X, y + 3);
-  tft.print(msg);
-}
-static void drawFooter(bool backPressed=false, bool savePressed=false){
-  Rect b = backRect();
-  Rect s = saveRect();
-
-  int clearX = PAD_X - 2;
-  int clearW = SCREEN_W - (PAD_X*2) + 4;
-  tft.fillRect(clearX, b.y-2, clearW, b.h+4, UI.bg);
-
-  FeatureUI::drawButtonRect(b.x, b.y, b.w, b.h, "Back",
-                            backPressed ? FeatureUI::ButtonStyle::Primary : FeatureUI::ButtonStyle::Secondary);
-
-  FeatureUI::drawButtonRect(s.x, s.y, s.w, s.h, "Save",
-                            FeatureUI::ButtonStyle::Primary);
-}
-static bool touchInRect(const Rect& r, int x, int y) {
-  return (x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h);
-}
-
-static void drawAll() {
-  tft.fillScreen(UI_BG);
-  buildPalette();
-
-  drawStatusBar(currentBatteryVoltage, true);
-  setTitleFont();
-  drawTitle();
-
-  auto& s = settings();
-  drawBrightness(s.brightness, sel==0);
-  drawTheme(s.theme, sel==1);
-  drawAccent(s.accentColor, sel==2);
-  drawNeoPixel(s.neopixelEnabled, sel==3);
-  bool autoScan = (s.autoWifiScan || s.autoBleScan);
-  drawAutoScan(autoScan, sel==4);
-
-  drawFooter(false, false);
-
-  last_sel        = sel;
-  last_brightness = s.brightness;
-  last_theme      = s.theme;
-  last_accent     = s.accentColor;
-  last_neopixel   = s.neopixelEnabled;
-  last_autoScan     = autoScan;
-  uiDirty = false;
-}
-
-static void redrawIfChanged() {
-  auto& s = settings();
-
-  if (s.theme != last_theme || s.accentColor != last_accent) {
-    applyThemeToPalette(s.theme);
-    buildPalette();
-    drawAll();
-    return;
-  }
-
-  if (sel != last_sel) {
-    drawCardStatic(0, sel==0);  drawBrightnessWidget(s.brightness, sel==0);
-    drawCardStatic(1, sel==1);  drawThemeWidget(s.theme, sel==1);
-    drawCardStatic(2, sel==2);  drawAccentWidget(s.accentColor, sel==2);
-    drawCardStatic(3, sel==3);  drawSwitchWidgetRow(s.neopixelEnabled, sel==3, 3);
-    bool autoScan = (s.autoWifiScan || s.autoBleScan);
-    drawCardStatic(4, sel==4);  drawSwitchWidgetRow(autoScan, sel==4, 4);
-    last_sel = sel;
-  } else {
-    if (s.brightness != last_brightness) {
-      drawBrightnessWidget(s.brightness, sel==0);
-      last_brightness = s.brightness;
-    }
-    if (s.neopixelEnabled != last_neopixel) {
-      drawSwitchWidgetRow(s.neopixelEnabled, sel==3, 3);
-      last_neopixel = s.neopixelEnabled;
-    }
-    bool autoScan = (s.autoWifiScan || s.autoBleScan);
-    if (autoScan != last_autoScan) {
-      drawSwitchWidgetRow(autoScan, sel==4, 4);
-      last_autoScan = autoScan;
-    }
-    if (s.theme != last_theme) {
-      drawThemeWidget(s.theme, sel==1);
-      last_theme = s.theme;
-    }
-  }
-
-  uiDirty = false;
-}
-
-static bool applyBrightness(uint8_t v){
-  if (v > 255) v = 255;
-  auto& s = settings();
-  if (s.brightness == v) return false;
-  s.brightness = v;
-  ::setBrightness(v);
-  dirtySettings = true;
-  uiDirty = true;
-  lastChangeMs = millis();
-  return true;
-}
-static bool applyTheme(Theme t){
-  auto& s = settings();
-  if (s.theme == t) return false;
-  s.theme = t;
-  applyThemeToPalette(t);
-  buildPalette();
-  dirtySettings = true;
-  uiDirty = true;
-  lastChangeMs = millis();
-  return true;
-}
-static bool applyAccent(uint8_t preset){
-  auto& s = settings();
-  preset = accentPresetClamp(preset);
-  if (s.accentColor == preset) return false;
-  s.accentColor = preset;
-  applyThemeToPalette(s.theme);
-  buildPalette();
-  dirtySettings = true;
-  uiDirty = true;
-  lastChangeMs = millis();
-  return true;
-}
-static bool applyNeoPixel(bool en){
-  auto& s = settings();
-  if (s.neopixelEnabled == en) return false;
-  s.neopixelEnabled = en;
-  dirtySettings = true;
-  uiDirty = true;
-  lastChangeMs = millis();
-  return true;
-}
-
-static bool applyAutoScan(bool en){
-  auto& s = settings();
-  if (s.autoWifiScan == en && s.autoBleScan == en) return false;
-  s.autoWifiScan = en;
-  s.autoBleScan  = en;
-  dirtySettings = true;
-  uiDirty = true;
-  lastChangeMs = millis();
-  return true;
-}
-
-static void handleTouch() {
-  int tx, ty;
-  static uint32_t lastToggleMs = 0;
-  static bool accentArmed = true;
-  if (!readTouchXY(tx, ty)) {
-    dragging = false;
-    accentArmed = true;
-    return;
-  }
-
-  Rect br = backRect();
-  Rect sr = saveRect();
-  if (touchInRect(br, tx, ty)) {
-    drawFooter(true, false);
-    delay(25);
-    drawFooter(false, false);
-
-    feature_exit_requested = true;
-    return;
-  }
-  if (touchInRect(sr, tx, ty)) {
-    drawFooter(false, true);
-    delay(25);
-    drawFooter(false, false);
-    if (dirtySettings) {
-      bool ok = settingsSave();
-      if (ok) {
-        dirtySettings = false;
-        footerToast("Saved", UI.ok);
-        delay(250);
-        footerToast("      ", UI_BG);
-      } else {
-        footerToast("Save FAILED", UI.warn);
-      }
-    } else {
-      footerToast("No changes", UI_TEXT);
-      delay(250);
-      footerToast("         ", UI_BG);
-    }
-    return;
-  }
-
-  for (int i=0;i<N;++i){
-    Rect rr = rowRect(i);
-    if (ty >= rr.y && ty <= rr.y+rr.h) { sel = i; break; }
-  }
-
-  auto& s = settings();
-
-  if (sel == 0) {
-    Rect tr = rBrightTrack();
-    Rect kb = rBrightKnob(s.brightness);
-
-    bool inTrack = (tx >= tr.x && tx <= tr.x+tr.w && ty >= tr.y-10 && ty <= tr.y+tr.h+10);
-    bool inKnob  = (tx >= kb.x && tx <= kb.x+kb.w && ty >= kb.y && ty <= kb.y+kb.h);
-
-    if (inTrack || inKnob) {
-      dragging = true;
-      long rel = tx - tr.x;
-      if (rel < 0) rel = 0;
-      if (rel > tr.w-1) rel = tr.w-1;
-      uint8_t v = (uint8_t)((rel * 255L) / (tr.w - 1));
-      applyBrightness(v);
-    }
-  } else if (sel == 1) {
-    // Whole row cycles to the next theme.
-    Rect r = rowRect(1);
-    uint32_t now = millis();
-    if (tx >= r.x && tx <= r.x + r.w && ty >= r.y && ty <= r.y + r.h) {
-      if (now - lastToggleMs > 200) {
-        applyTheme((Theme)(((uint8_t)s.theme + 1u) % kThemeCount));
-        lastToggleMs = now;
-      }
-    }
-  } else if (sel == 2) {
-    Rect sw = rAccentSwatch();
-    const bool onSwatch =
-        (tx >= sw.x - 80 && tx <= sw.x + sw.w && ty >= sw.y - 8 && ty <= sw.y + sw.h + 8);
-    if (onSwatch) {
-      uint32_t now = millis();
-      if (accentArmed && (now - lastToggleMs > 250)) {
-        uint8_t next = (s.accentColor + 1) % ACCENT_PRESET_COUNT;
-        applyAccent(next);
-        lastToggleMs = now;
-        accentArmed = false;
-      }
-    } else {
-      accentArmed = true;
-    }
-  } else if (sel == 3) {
-    Rect tr = rSwitchTrack(3);
-    if (tx >= tr.x && tx <= tr.x+tr.w && ty >= tr.y-10 && ty <= tr.y+tr.h+10) {
-      uint32_t now = millis();
-      if (now - lastToggleMs > 120) {
-        applyNeoPixel(!s.neopixelEnabled);
-        lastToggleMs = now;
-      }
-    }
-  } else if (sel == 4) {
-    Rect tr = rSwitchTrack(4);
-    if (tx >= tr.x && tx <= tr.x+tr.w && ty >= tr.y-10 && ty <= tr.y+tr.h+10) {
-      uint32_t now = millis();
-      if (now - lastToggleMs > 120) {
-        bool autoScan = (s.autoWifiScan || s.autoBleScan);
-        applyAutoScan(!autoScan);
-        lastToggleMs = now;
-      }
-    }
-  }
-}
-
-void setup(){
-
+static void draw() {
   applyThemeToPalette(settings().theme);
-  buildPalette();
-  ::setBrightness(settings().brightness);
-  sel = 0; dirtySettings = false; uiDirty = false; dragging = false;
-  drawAll();
+  tft.fillScreen(UI.bg);
+  drawStatusBar(currentBatteryVoltage, true);
+  tft.setTextSize(1); tft.setTextFont(2); tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(UI.text, UI.bg);
+  tft.drawString("Settings", 10, 25, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString("Back", tft.width() - 10, 25, 2);
+  const auto& s = settings();
+  for (int i = 0; i < count; ++i) {
+    const int y = top + i * rowH;
+    const uint16_t bg = i == selected ? UI.icon : UI.bg;
+    const uint16_t fg = i == selected ? TFT_BLACK : UI.text;
+    tft.fillRect(6, y, tft.width() - 12, rowH - 1, bg);
+    tft.drawFastHLine(6, y + rowH - 1, tft.width() - 12, UI.line);
+    tft.setTextColor(fg, bg); tft.setTextDatum(ML_DATUM);
+    tft.drawString(labels[i], 12, y + rowH / 2, 2);
+    char value[20];
+    switch (i) {
+      case 0: snprintf(value, sizeof(value), "%u%%", (unsigned)((s.brightness * 100u + 127u) / 255u)); break;
+      case 1: snprintf(value, sizeof(value), "%s", themeName(s.theme)); break;
+      case 2: snprintf(value, sizeof(value), "%s", accentPresetName(s.accentColor)); break;
+      case 3: snprintf(value, sizeof(value), "%s", s.neopixelEnabled ? "On" : "Off"); break;
+      case 4: snprintf(value, sizeof(value), "%s", s.autoWifiScan || s.autoBleScan ? "On" : "Off"); break;
+      case 5: snprintf(value, sizeof(value), "%s", !DetectionAlerts::available() ? "No buzzer" : s.detectionSound ? "On" : "Muted"); break;
+      default: snprintf(value, sizeof(value), "%s", s.detectionSound ? "Play" : "Muted"); break;
+    }
+    tft.setTextDatum(MR_DATUM);
+    tft.drawString(value, tft.width() - 12, y + rowH / 2, 2);
+  }
+  tft.setTextFont(1); tft.setTextDatum(TL_DATUM); tft.setTextColor(UI_DIM_TEXT, UI.bg);
+  tft.drawString(message, 10, top + count * rowH + 10, 1);
+  setTouchNavLabels("-", "Down", "Save", "Up", "+");
+  redrawTouchButtonBar();
+  redraw = false;
 }
-
-void loop(){
-  bool changedByButtons=false;
-
-  static bool upWasDown     = false;
-  static bool downWasDown   = false;
-  static bool leftWasDown   = false;
-  static bool rightWasDown  = false;
-  static bool selectWasDown = false;
-  static uint32_t lastNavMs = 0;
-  static uint32_t lastActionMs = 0;
-  const uint32_t NAV_DEBOUNCE_MS    = 140;
-  const uint32_t ACTION_DEBOUNCE_MS = 140;
-
-  uint32_t now = millis();
-
-  bool upNow     = isButtonPressed(BTN_UP);
-  bool downNow   = isButtonPressed(BTN_DOWN);
-  bool leftNow   = isButtonPressed(BTN_LEFT);
-  bool rightNow  = isButtonPressed(BTN_RIGHT);
-  bool selectNow = isButtonPressed(BTN_SELECT);
-
-  if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
-    feature_exit_requested = true;
-    lastActionMs = now;
-    return;
-  }
-
-  if (upNow && !upWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) {
-    sel=(sel+N-1)%N; changedByButtons=true;
-    lastNavMs = now;
-  }
-  if (downNow && !downWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) {
-    sel=(sel+1)%N;   changedByButtons=true;
-    lastNavMs = now;
-  }
-
-  if (leftNow && !leftWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)){
-    auto& s=settings();
-    if (sel==0 && s.brightness>0)      { applyBrightness(s.brightness>8? s.brightness-8:0); }
-    else if (sel==1)                   { applyTheme((Theme)((uint8_t(s.theme) + kThemeCount - 1u) % kThemeCount)); }
-    else if (sel==2)                   { applyAccent((s.accentColor + ACCENT_PRESET_COUNT - 1) % ACCENT_PRESET_COUNT); }
-    else if (sel==3)                   { applyNeoPixel(false); }
-    else if (sel==4)                   { applyAutoScan(false); }
-    changedByButtons=true;
-    lastActionMs = now;
-  }
-  if ((rightNow && !rightWasDown) && (now - lastActionMs > ACTION_DEBOUNCE_MS)){
-    auto& s=settings();
-    if (sel==0 && s.brightness<255)    { applyBrightness(s.brightness+8); }
-    else if (sel==1)                   { applyTheme((Theme)((uint8_t(s.theme) + 1u) % kThemeCount)); }
-    else if (sel==2)                   { applyAccent((s.accentColor + 1) % ACCENT_PRESET_COUNT); }
-    else if (sel==3)                   { applyNeoPixel(true); }
-    else if (sel==4)                   { applyAutoScan(true); }
-    changedByButtons=true;
-    lastActionMs = now;
-  }
-
-  upWasDown     = upNow;
-  downWasDown   = downNow;
-  leftWasDown   = leftNow;
-  rightWasDown  = rightNow;
-  selectWasDown = selectNow;
-
-  handleTouch();
-
-  if (changedByButtons || uiDirty) redrawIfChanged();
-
-  delay(2);
+static void leave() {
+  setTouchButtonInputEnabled(false);
+  feature_exit_requested = true;
 }
-
+static void saveAndLeave() {
+  if (!dirty || settingsSave()) { dirty = false; leave(); }
+  else hint("SD save failed; tap Back to leave");
+}
+static void change(int direction) {
+  auto& s = settings();
+  switch (selected) {
+    case 0: {
+      // Never let the settings screen extinguish its own backlight.
+      int value = (int)s.brightness + direction * 16;
+      if (value < 16) value = 16;
+      if (value > 255) value = 255;
+      s.brightness = (uint8_t)value; ::setBrightness(s.brightness); break;
+    }
+    case 1: s.theme = (Theme)((uint8_t(s.theme) + kThemeCount + direction) % kThemeCount); break;
+    case 2: s.accentColor = (s.accentColor + ACCENT_PRESET_COUNT + direction) % ACCENT_PRESET_COUNT; break;
+    case 3: s.neopixelEnabled = !s.neopixelEnabled; break;
+    case 4: s.autoWifiScan = s.autoBleScan = !(s.autoWifiScan || s.autoBleScan); break;
+    case 5: {
+      const bool value = !s.detectionSound;
+      const bool saved = settingsSetDetectionSound(value);
+      DetectionAlerts::setEnabled(value);
+      hint(saved ? (value ? "Sound on; saved on device" : "Muted; saved on device") : "Sound changed; device save failed");
+      dirty = true; return;
+    }
+    case 6:
+      hint(DetectionAlerts::preview() ? "Playing two short chirps" : "Enable sound to test the buzzer");
+      return;
+  }
+  dirty = true;
+  hint("Changed - Save to keep settings");
+}
+void setup() {
+  selected = 0; dirty = false; redraw = true; touchArmed = false; opening = true;
+  for (bool& down : wasDown) down = false;
+  snprintf(message, sizeof(message), "Tap a row or use the keys");
+  setTouchButtonInputEnabled(true);
+  setTouchNavLabels("-", "Down", "Save", "Up", "+");
+  draw();
+}
+void loop() {
+  const int pins[5] = {BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT};
+  bool down[5], any = false;
+  for (int i = 0; i < 5; ++i) { down[i] = isButtonPressed(pins[i]); any |= down[i]; }
+  int tx = 0, ty = 0;
+  const bool touching = readTouchXY(tx, ty);
+  // Do not consume the press that opened Settings as a Save/Back press.
+  if (opening) {
+    for (int i = 0; i < 5; ++i) wasDown[i] = down[i];
+    if (!any && !touching) { opening = false; touchArmed = true; }
+    delay(5); return;
+  }
+  if (down[0] && !wasDown[0]) { selected = (selected + count - 1) % count; redraw = true; }
+  if (down[1] && !wasDown[1]) { selected = (selected + 1) % count; redraw = true; }
+  if (down[2] && !wasDown[2]) change(-1);
+  if (down[3] && !wasDown[3]) change(1);
+  if (down[4] && !wasDown[4]) { saveAndLeave(); if (feature_exit_requested) return; }
+  for (int i = 0; i < 5; ++i) wasDown[i] = down[i];
+  if (!touching) touchArmed = true;
+  else if (touchArmed) {
+    touchArmed = false;
+    if (ty >= 22 && ty < top && tx >= tft.width() - 68) { leave(); return; }
+    if (tx >= 6 && tx < tft.width() - 6 && ty >= top && ty < top + count * rowH) {
+      selected = (ty - top) / rowH;
+      change(1);
+    }
+  }
+  if (redraw) draw();
+  delay(5);
+}
 }
 
 namespace SdFileManager {

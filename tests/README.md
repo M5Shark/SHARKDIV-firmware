@@ -18,6 +18,13 @@ temporary directories and are removed when the scripts finish.
   hold, release, latched/serial taps and rollover without duplicate actions.
 - BLE lifecycle: runs the actual host-queue helper against mock FreeRTOS/NimBLE
   APIs and verifies teardown cannot delete a result until the host callback finishes.
+- Detection audio: executes the production task against a simulated clock/PWM;
+  checks finite tones, mute, exit cancellation, background silence and backlight
+  isolation. Policy checks cover bursts, duplicates, capacity and time rollover.
+- Menu/settings: production text fitting, overflow paging, held-touch protection,
+  opening-press handling, brightness bounds and persistence failure paths.
+- Receiver alerts: production receive handlers, partial radio startup failures,
+  passive Radar deadlines, GPS validation, BLE borrowed ownership and WPS results.
 - Web flasher: runs the actual installer script with a simulated serial device;
   checks successful writes, cancellation, wrong-chip rejection, error recovery
   and that the manifest points to an existing merged ESP32-S3 image.
@@ -30,4 +37,4 @@ Build the firmware separately with `./build-div-mac.sh` and the dependencies in
 navigation and text, confirm receiver start/stop repeatedly, compare RF occupancy
 against a known signal, receive known Find My/Remote ID test broadcasts and test
 USB installation/power behavior. The browser manifest intentionally continues to
-serve stable v1.7.29 while the source is v1.7.30-flock.
+serve stable v1.7.29 while the source is v1.7.31-alerts.
