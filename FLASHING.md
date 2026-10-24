@@ -63,7 +63,7 @@ arduino-cli path in step 5 passes the same flag automatically).
 
 ## 4. Board settings (Arduino IDE)
 
-Open `sharkdiv/ESP32-DIV.ino`, then under **Tools** set:
+Open `sharkdiv/sharkdiv.ino`, then under **Tools** set:
 
 | Setting                | Value                          |
 |------------------------|--------------------------------|
@@ -107,8 +107,8 @@ arduino-cli upload  --fqbn "$FQBN" -p PORT ESP32-DIV
 
 ## 6. First boot
 
-You should see the green boot splash, then the main menu in the **Hacker** theme
-(green-on-black). If the UI comes up in a different theme, switch it under
+You should see a short static logo, then the flat main menu in the **Hacker** theme
+(green selection on a dark background). If the UI comes up in a different theme, switch it under
 **Settings → Theme → Hacker**. Flock Hunter is in the **WiFi** menu.
 
 ## Troubleshooting
@@ -127,6 +127,8 @@ You should see the green boot splash, then the main menu in the **Hacker** theme
 
 ---
 
-If you have your board's compiled `firmware.bin` (e.g. from a previous build), you can
-also flash it directly with `esptool.py write_flash 0x0 firmware.bin` — but building
-from source as above is the supported path.
+Only a **merged** image containing the bootloader, partitions and app belongs at
+`0x0` on this ESP32-S3 board. `build/sharkdiv.ino.bin` is an **application-only**
+image for `0x10000`; writing it at `0x0` will not boot. Prefer `arduino-cli upload`
+for a complete local build. The browser installers still offer stable v1.7.29,
+not the unreleased v1.7.30-dev source changes.

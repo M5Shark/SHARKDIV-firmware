@@ -18,14 +18,8 @@
 #define HACK_LABLE  0x0560
 #define HACK_ACCENT 0x07FF
 
-// Shark theme: the SHARKDIV brand — the web flasher's phosphor green on black.
-//   bg     black
-//   fg     card / key surface (dark green)
-//   icon   phosphor green accent
-//   text   green-tinted ink
-//   line   green hairline
-//   lable  header / nav band
-//   warn   amber
+// Shark theme: neutral instrument surfaces with green focus and amber warnings.
+// Menu resting cells use bg; fg is reserved for controls on feature screens.
 #define SHARK_BG     0x0000
 #define SHARK_FG     BRAND_CARD
 #define SHARK_ICON   BRAND_ACCENT
@@ -70,8 +64,8 @@ void applyThemeToPalette(Theme t) {
     UI.ok     =  HACK_TEXT;
 
   } else if (t == Theme::Shark) {
-    // SHARKDIV brand: black surfaces, green-tinted ink, phosphor green accent.
-    // The accent preset is ignored so the system color stays brand green.
+    // Neutral surfaces separate text from the green focus / control color.
+    // The accent preset is ignored so the brand focus color stays consistent.
     UI.bg     =  SHARK_BG;
     UI.fg     =  SHARK_FG;
     UI.icon   =  SHARK_ICON;

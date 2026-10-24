@@ -4,251 +4,69 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>SHARKDIV Web Flasher</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Manrope:wght@300;400;500;600&display=swap">
 <style>
-/* Black water, green sharks — the ASCII sea runs behind one glass flasher card. */
-:root {
-  --mode: dark;
-  --paper: #000000;
-  --ink: #e9f3ec;
-  --ink-soft: #a9bcae;
-  --muted: #64766a;
-  --accent: #3ee07f;
-  --glow: #4fd98a;
-  --grid: rgba(80, 230, 140, 0.05);
-  --glass: rgba(6, 12, 9, 0.60);
-  --glass-solid: rgba(7, 13, 10, 0.95);
-  --glass-line: rgba(110, 240, 160, 0.14);
-  --ring: rgba(80, 230, 140, 0.42);
-  --chip: rgba(110, 240, 160, 0.08);
-  --fog: rgba(0, 0, 0, 0.82);
-  --fog-mid: rgba(0, 0, 0, 0.36);
-  --edge-hi: rgba(160, 255, 200, 0.05);
-  --shadow: rgba(0, 0, 0, 0.8);
-  --warn: #ffd54f;
-  --bad: #ff6b6b;
-  --display: "Manrope", "Avenir Next", "Helvetica Neue", Arial, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  --cell: 12px;
-  color-scheme: dark;
-  box-sizing: border-box;
-}
-*, *::before, *::after { box-sizing: inherit; }
-[hidden] { display: none !important; }  /* .opt / .notice set display, which would otherwise beat the attribute */
-html, body { height: 100%; }
-body {
-  margin: 0;
-  background: var(--paper);
-  color: var(--ink);
-  font-family: var(--display);
-  overflow: hidden;
-  -webkit-font-smoothing: antialiased;
-}
-button { font: inherit; }
-
-.stage {
-  position: fixed;
-  inset: 0;
-  overflow: hidden;
-  background-color: var(--paper);
-  background-image:
-    linear-gradient(to right, var(--grid) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
-  background-size: var(--cell) var(--cell);
-}
-#sea { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
-.lens, .fog {
-  position: absolute; left: 50%; top: 50%;
-  width: min(1120px, 140vw); height: min(620px, 82vh);
-  transform: translate(-50%, -50%); pointer-events: none;
-}
-.lens {
-  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
-  -webkit-mask-image: radial-gradient(closest-side, black 28%, transparent 100%);
-  mask-image: radial-gradient(closest-side, black 28%, transparent 100%);
-}
-.fog { background: radial-gradient(closest-side, var(--fog) 0%, var(--fog-mid) 52%, transparent 100%); }
-
-/* ---- centered flasher ---- */
-.center {
-  position: absolute; inset: 0; z-index: 3;
-  display: flex; align-items: center; justify-content: center;
-  padding-left: max(16px, env(safe-area-inset-left, 0px));
-  padding-right: max(16px, env(safe-area-inset-right, 0px));
-  padding-block: calc(28px + env(safe-area-inset-top, 0px)) calc(24px + env(safe-area-inset-bottom, 0px));
-  pointer-events: none;
-}
-.col {
-  width: min(540px, 100%);
-  display: flex; flex-direction: column; align-items: center; gap: 18px;
-  pointer-events: auto;
-}
-h1 {
-  margin: 0;
-  font-weight: 300;
-  font-size: clamp(28px, 4.4vw, 42px);
-  line-height: 1.05; letter-spacing: -0.03em; text-align: center;
-  color: var(--ink);
-}
-h1 b { font-weight: 600; color: var(--accent); }
-.sub {
-  margin: -8px 0 0; font: 400 12.5px/1.5 var(--mono);
-  letter-spacing: 0.02em; color: var(--muted); text-align: center;
-}
-
-.panel {
-  width: 100%;
-  display: flex; flex-direction: column; gap: 16px;
-  padding: 20px 20px 16px;
-  border-radius: 16px;
-  border: 1px solid var(--glass-line);
-  background: var(--glass);
-  -webkit-backdrop-filter: blur(16px) saturate(1.05);
-  backdrop-filter: blur(16px) saturate(1.05);
-  box-shadow: inset 0 1px 0 var(--edge-hi), 0 22px 54px -26px var(--shadow);
-}
-
-.steps { margin: 0; padding-left: 20px; color: var(--ink-soft); font-size: 13.5px; }
-.steps li { margin: 5px 0; }
-.steps b { color: var(--ink); font-weight: 600; }
-.kbd {
-  font: 500 11px/1 var(--mono); color: var(--accent);
-  background: var(--chip); border: 1px solid var(--glass-line);
-  padding: 2px 5px; border-radius: 5px;
-}
-
-.opt {
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 12px; border-radius: 10px;
-  background: var(--chip); border: 1px solid var(--glass-line);
-  font-size: 13px; color: var(--ink-soft); cursor: pointer;
-}
-.opt input { accent-color: var(--accent); width: 16px; height: 16px; flex: none; cursor: pointer; }
-.opt .opt-sub { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
-
-.go {
-  position: relative; overflow: hidden; isolation: isolate;
-  width: 100%; min-height: 50px; padding: 14px;
-  display: inline-flex; align-items: center; justify-content: center; gap: 9px;
-  border: 0; border-radius: 11px; cursor: pointer;
-  font-size: 16px; font-weight: 700; letter-spacing: 0.01em;
-  color: #001b0a; background: var(--accent);
-  transition: filter 0.15s, transform 0.12s, opacity 0.15s;
-}
-.go > * { position: relative; z-index: 1; }
-/* ASCII glint that sweeps across the idle button every few seconds */
-.go::after {
-  content: "/ // /";
-  position: absolute; z-index: 0; top: 50%; left: -110px;
-  transform: translateY(-50%);
-  font: 700 28px/1 var(--mono); letter-spacing: -4px; white-space: pre;
-  color: rgba(255, 255, 255, 0.5);
-  pointer-events: none;
-  animation: glint 6s ease-in-out 1.5s infinite;
-}
-@keyframes glint { 0%, 74% { left: -110px; } 100% { left: calc(100% + 30px); } }
-.go:disabled::after { display: none; }
-.go:not(:disabled):hover { filter: brightness(1.07); }
-.go:not(:disabled):active { transform: scale(0.985); }
-.go:disabled { cursor: default; opacity: 0.55; }
-.go.busy:disabled { opacity: 0.85; }
-.go svg { flex: none; }
-#goLabel { display: inline-block; white-space: nowrap; overflow: hidden; text-align: center; }
-.aspin { flex: none; display: inline-block; width: 3ch; font: 700 15px/1 var(--mono); white-space: pre; text-align: left; }
-
-.progress { display: none; flex-direction: column; gap: 8px; }
-.progress.show { display: flex; }
-/* ASCII progress: a shark fin cutting along a two-row water line */
-.atrack {
-  padding: 5px 10px 6px; border-radius: 9px;
-  background: #040b07; border: 1px solid var(--glass-line);
-  font: 500 13px/1.2 var(--mono); white-space: pre; overflow: hidden;
-  user-select: none;
-}
-.arow { display: block; height: 1.2em; }
-.a-w  { color: var(--accent); }
-.a-w2 { color: #23a05a; }
-.a-f  { color: var(--ink); text-shadow: 0 0 6px rgba(80, 230, 140, 0.55); }
-.a-p  { color: #3d5246; }
-.a-s  { color: rgba(140, 240, 180, 0.6); }
-.atrack.err .a-w, .atrack.err .a-w2, .atrack.err .a-f, .atrack.err .a-s { color: var(--bad); text-shadow: none; }
-.progress.err .pct { color: var(--bad); }
-@media (prefers-reduced-motion: reduce) { .go::after { display: none; } }
-.pmeta {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  font: 400 12px/1.4 var(--mono); color: var(--ink-soft);
-}
-.pmeta .pct { color: var(--accent); font-variant-numeric: tabular-nums; }
-.status { color: var(--ink-soft); }
-.status.err { color: var(--bad); }
-.status.ok { color: var(--accent); }
-
-.log {
-  display: none; margin: 0; max-height: 132px; overflow: auto;
-  padding: 10px 12px; border-radius: 10px;
-  background: #040b07; border: 1px solid var(--glass-line);
-  font: 400 11px/1.5 var(--mono); color: #7fae8f;
-  white-space: pre-wrap; word-break: break-word;
-}
-.log.show { display: block; }
-
-.logtoggle {
-  align-self: flex-start; border: 0; background: none; padding: 0;
-  font: 500 11px/1 var(--mono); letter-spacing: 0.04em; text-transform: uppercase;
-  color: var(--muted); cursor: pointer;
-}
-.logtoggle:hover { color: var(--ink-soft); }
-
-.notice {
-  padding: 11px 13px; border-radius: 10px; font-size: 12.5px; line-height: 1.5;
-  background: rgba(255, 213, 79, 0.07); border: 1px solid rgba(255, 213, 79, 0.22);
-  color: var(--warn);
-}
-.notice.hard { background: rgba(255,107,107,0.08); border-color: rgba(255,107,107,0.28); color: var(--bad); }
-.notice a { color: inherit; }
-
-.help { border-radius: 10px; border: 1px solid var(--glass-line); background: var(--chip); }
-.help summary {
-  cursor: pointer; list-style: none; padding: 10px 12px;
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  font-size: 13px; font-weight: 500; color: var(--ink-soft);
-}
-.help summary::-webkit-details-marker { display: none; }
-.help summary::after { content: "+"; font: 500 14px/1 var(--mono); color: var(--muted); }
-.help[open] summary::after { content: "\2013"; }
-.help summary:hover { color: var(--ink); }
-.help p { margin: 0; padding: 0 13px 6px; font-size: 12px; line-height: 1.5; color: var(--muted); }
-.help p.tip { margin: 2px 13px 10px; padding: 8px 10px; border-radius: 8px; font-size: 12.5px; color: var(--ink-soft); background: rgba(110, 240, 160, 0.06); border: 1px solid var(--glass-line); }
-.help ol { margin: 0; padding: 2px 14px 12px 32px; font-size: 12.5px; line-height: 1.5; color: var(--ink-soft); }
-.help li { margin: 5px 0; }
-.help b { color: var(--ink); font-weight: 600; }
-
-.foot { font-size: 11.5px; line-height: 1.6; color: var(--muted); text-align: center; }
-.foot a { color: var(--ink-soft); text-decoration: none; }
-.foot a:hover { color: var(--accent); }
-
-a { color: var(--accent); }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-
-@media (max-width: 480px) {
-  .panel { padding: 16px 15px 14px; }
-  .steps { font-size: 13px; }
-}
+:root { color-scheme: dark; --paper:#111315; --ink:#f1f3f2; --ink-soft:#c0c5c3; --muted:#a1aaa6; --accent:#58d68d; --line:#3b4140; --bad:#ff8c84; --warn:#e8c879; --mono:ui-monospace,"SFMono-Regular",Consolas,monospace; }
+* { box-sizing:border-box; }
+[hidden] { display:none !important; }
+body { margin:0; color:var(--ink); background:var(--paper); font:15px/1.55 system-ui,sans-serif; }
+a { color:var(--accent); text-underline-offset:3px; }
+button,input { font:inherit; }
+button { cursor:pointer; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
+.center { max-width:780px; margin:0 auto; padding:48px 24px; }
+.col { width:100%; }
+h1 { margin:0; font:700 clamp(28px,6vw,40px)/1.1 var(--mono); letter-spacing:-1.5px; }
+h1 b { color:var(--accent); }
+.sub { margin:14px 0 32px; color:var(--muted); font:12px/1.6 var(--mono); }
+.panel { border-top:2px solid var(--accent); padding-top:24px; display:flex; flex-direction:column; gap:20px; }
+.steps { margin:0; padding-left:24px; color:var(--ink-soft); }
+.steps li { padding-left:8px; margin-bottom:12px; }
+.steps li::marker { color:var(--accent); font-family:var(--mono); }
+.steps b,.help b { color:var(--ink); }
+.kbd { font:12px var(--mono); border:1px solid var(--line); padding:2px 4px; }
+.opt { display:flex; align-items:flex-start; gap:10px; padding:12px 0; border-top:1px solid var(--line); cursor:pointer; }
+.opt input { margin-top:5px; width:18px; height:18px; accent-color:var(--accent); flex:none; }
+.opt-sub { display:block; font-size:12px; color:var(--muted); margin-top:3px; }
+.go,.secondary { min-height:48px; border:1px solid var(--accent); border-radius:0; padding:12px 18px; font-weight:650; }
+.go { display:flex; align-items:center; justify-content:center; gap:10px; color:#092013; background:var(--accent); }
+.go:disabled { cursor:wait; opacity:.65; }
+.go:not(:disabled):hover { background:#80e5a9; }
+.secondary { color:var(--ink); background:transparent; border-color:var(--line); }
+.secondary:hover { border-color:var(--accent); }
+.progress { display:none; }
+.progress.show { display:block; }
+.atrack { height:8px; background:#303735; }
+.arow { display:block; height:100%; width:0; background:var(--accent); }
+.atrack.err .arow { background:var(--bad); }
+.atrack[data-mode="scan"] .arow { width:100% !important; opacity:.35; }
+.pmeta { display:flex; justify-content:space-between; align-items:baseline; gap:16px; margin-top:12px; font:12px/1.6 var(--mono); }
+.pct { color:var(--accent); white-space:nowrap; }
+.status.err { color:var(--bad); } .status.ok { color:var(--accent); }
+.log { display:none; margin:0; max-height:180px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; padding:12px; background:#090b0a; font:12px/1.5 var(--mono); border:1px solid var(--line); }
+.log.show { display:block; }
+.logtoggle { align-self:flex-start; padding:6px 0; border:0; background:none; color:var(--ink-soft); text-decoration:underline; text-underline-offset:3px; }
+.notice { padding:12px; border-left:3px solid var(--warn); color:var(--warn); font-size:13px; }
+.notice.hard { border-color:var(--bad); color:var(--bad); }
+.help { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:0 0 4px; }
+.help summary { padding:14px 0; cursor:pointer; font-weight:600; }
+.help p,.help ol { color:var(--ink-soft); font-size:13px; }
+.help li { margin:8px 0; }
+.help .tip { border-left:2px solid var(--accent); padding-left:12px; }
+.alt { border-top:1px solid var(--line); padding-top:16px; }
+.alt h2 { font:600 15px var(--mono); margin:0 0 10px; }
+.alt p,.foot { color:var(--muted); font-size:12px; }
+.foot { border-top:1px solid var(--line); padding-top:16px; }
+.sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
+@media (max-width:480px) { .center { padding:28px 18px; } .steps { font-size:14px; } }
 </style>
 </head>
 <body>
 <main class="stage" id="stage">
-  <canvas id="sea" aria-hidden="true"></canvas>
-  <div class="lens" aria-hidden="true"></div>
-  <div class="fog" aria-hidden="true"></div>
 
   <section class="center">
     <div class="col">
       <h1>SHARK<b>DIV</b> flasher</h1>
-      <p class="sub">v1.7.29 · flashes straight from the browser, no installs</p>
+      <p class="sub">ESP32-S3 / 16 MB / STABLE v1.7.29</p>
 
       <div class="panel">
         <ol class="steps">
@@ -278,8 +96,8 @@ a { color: var(--accent); }
         </button>
 
         <div class="progress" id="progress">
-          <div class="atrack" id="atrack" role="progressbar" aria-label="Flash progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="arow" id="aRow0" aria-hidden="true"></span><span class="arow" id="aRow1" aria-hidden="true"></span></div>
-          <div class="pmeta"><span class="status" id="status">Ready.</span><span class="pct" id="pct"></span></div>
+          <div class="atrack" id="atrack" role="progressbar" aria-label="Flash progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="arow" id="aRow0" aria-hidden="true"></span></div>
+          <div class="pmeta"><span class="status" id="status" role="status" aria-live="polite">Ready.</span><span class="pct" id="pct"></span></div>
         </div>
 
         <button class="logtoggle" id="logtoggle" type="button" hidden>Show log</button>
@@ -300,601 +118,43 @@ a { color: var(--accent); }
           </ol>
         </details>
 
+        <section class="alt" aria-labelledby="espToolsTitle">
+          <h2 id="espToolsTitle">ESP Web Tools</h2>
+          <p>Alternate installer and serial console for stable v1.7.29. The main flasher above includes this board’s backlight power fix. For the alternate installer, use USB power with the battery disconnected if the board switches off.</p>
+          <esp-web-install-button manifest="manifest.json">
+            <button slot="activate" class="secondary" type="button" disabled>Loading ESP Web Tools…</button>
+            <span slot="unsupported">Use a desktop browser with Web Serial to connect over USB.</span>
+            <span slot="not-allowed">Open this page over HTTPS or localhost to use USB.</span>
+          </esp-web-install-button>
+          <p id="espToolsStatus" role="status"></p>
+        </section>
+
         <div class="foot">
-          Full 16&nbsp;MB image — bootloader, partition table and app in one file. Flashing takes
+          Merged image for 16&nbsp;MB boards — bootloader, partition table and app in one file. Flashing takes
           1–2&nbsp;minutes at 115200&nbsp;baud; don't unplug.<br>
           Trouble? Flash over USB with esptool — see
           <a href="https://github.com/M5Shark/SHARKDIV-firmware/blob/main/FLASHING.md">FLASHING.md</a>.
           Firmware: <a href="https://github.com/M5Shark/SHARKDIV-firmware">github.com/M5Shark/SHARKDIV-firmware</a>
-          (MIT, based on CiferTech ESP32-DIV).
+          See <a href="INTEGRATIONS.md">integration and license notes</a>.
         </div>
       </div>
     </div>
   </section>
 </main>
 
-<!-- ============================ ASCII shark sea ============================ -->
-<script>
-(() => {
-  "use strict";
-  const $ = (id) => document.getElementById(id);
-  const stage = $("stage");
-  const canvas = $("sea");
-  const ctx = canvas.getContext("2d");
-  const buf = document.createElement("canvas");
-  const bctx = buf.getContext("2d", { willReadFrequently: true });
-  const layer = document.createElement("canvas");
-  const lctx = layer.getContext("2d");
-  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
-
-  const rand = (a, b) => a + Math.random() * (b - a);
-  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
-  const mix = (a, b, t) => a + (b - a) * t;
-  const mixRGB = (a, b, t) => [mix(a[0], b[0], t), mix(a[1], b[1], t), mix(a[2], b[2], t)];
-  const smooth = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
-  const wrapAngle = (a) => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; };
-  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  function hash(a, b, c) {
-    let h = Math.imul(a | 0, 374761393) ^ Math.imul(b | 0, 668265263) ^ Math.imul(c | 0, 1274126177);
-    h = Math.imul(h ^ (h >>> 13), 1103515245);
-    h ^= h >>> 16;
-    return (h >>> 0) / 4294967296;
-  }
-
-  const SS = 3;
-  let W = 0, H = 0, DPR = 1, C = 12, COLS = 0, ROWS = 0;
-  let occ = new Float32Array(0), stamp = new Uint32Array(0), frameId = 1;
-  let glyphFont = "";
-  let T = 0;
-  let frenzyUntil = 0;
-  let flashing = false;
-  const theme = { dark: false, paper: [246, 246, 243], ink: [21, 22, 24] };
-  const pointer = { x: -9999, y: -9999, active: false, lx: 0, ly: 0, travel: 0 };
-  const startles = [];
-  let sharks = [], plankton = [], bubbles = [];
-
-  function parseColor(str) {
-    const s = str.trim();
-    if (s[0] === "#") {
-      let h = s.slice(1);
-      if (h.length === 3) h = h.split("").map((c) => c + c).join("");
-      const n = parseInt(h, 16);
-      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-    }
-    const m = s.match(/[\d.]+/g);
-    return m ? m.slice(0, 3).map(Number) : [0, 0, 0];
-  }
-  function readTheme() {
-    const cs = getComputedStyle(document.documentElement);
-    theme.dark = cs.getPropertyValue("--mode").trim() === "dark";
-    theme.paper = parseColor(cs.getPropertyValue("--paper"));
-    theme.ink = parseColor(cs.getPropertyValue("--ink"));
-    theme.glow = parseColor(cs.getPropertyValue("--glow") || "#4fd98a");
-  }
-
-  const PS  = [0, .02, .06, .12, .22, .32, .45, .58, .70, .80, .88, 1];
-  const PHT = [0, .04, .072, .098, .114, .12, .11, .088, .062, .039, .028, .025];
-  const PHB = [0, .026, .058, .085, .1, .106, .094, .071, .049, .034, .026, .023];
-  const PW  = [0, .046, .084, .104, .11, .108, .094, .071, .048, .03, .02, .015];
-  function prof(arr, s) {
-    if (s <= 0) return arr[0];
-    let i = 1;
-    while (i < PS.length - 1 && PS[i] < s) i++;
-    const t = clamp((s - PS[i - 1]) / (PS[i] - PS[i - 1]), 0, 1);
-    return arr[i - 1] + (arr[i] - arr[i - 1]) * t;
-  }
-  const ht = (s) => prof(PHT, s), hb = (s) => prof(PHB, s), wd = (s) => prof(PW, s);
-  const RING = [0, .015, .04, .08, .13, .19, .26, .33, .41, .49, .57, .65, .72, .79, .84, .88]
-    .map((s) => ({ s, ht: ht(s), hb: hb(s), w: wd(s), lift: s < .1 ? .012 * (1 - s / .1) : 0 }));
-  const NR = 10;
-  const COS = [], SIN = [];
-  for (let k = 0; k < NR; k++) { const a = (k / NR) * Math.PI * 2; COS.push(Math.cos(a)); SIN.push(Math.sin(a)); }
-  const LD = (() => { const v = [-0.42, -0.62, 0.66]; const l = Math.hypot(v[0], v[1], v[2]); return v.map((x) => x / l); })();
-  const HAZE = [6, 34, 18];
-  const PALETTES = [
-    { dorsal: [36, 156, 84], belly: [176, 248, 196] },
-    { dorsal: [26, 138, 100], belly: [160, 242, 208] },
-    { dorsal: [62, 166, 62], belly: [196, 252, 172] },
-    { dorsal: [30, 146, 72], belly: [152, 238, 178] },
-    { dorsal: [46, 174, 112], belly: [182, 250, 212] },
-  ];
-  const DEPTHS = [1, .74, .9, .64, .84, .7];
-  const NP = 24;
-
-  class Shark {
-    constructor(i, n) {
-      this.seed = Math.random() * 1000;
-      this.depth = DEPTHS[i % DEPTHS.length];
-      this.pal = PALETTES[i % PALETTES.length];
-      this.tilt = rand(.3, 1.15);
-      this.pts = Array.from({ length: NP }, () => ({ x: 0, y: 0 }));
-      this.tan = Array.from({ length: NP }, () => ({ x: 1, y: 0 }));
-      this.phase = rand(0, 6.28);
-      this.wanderPhase = rand(0, 100);
-      this.turn = 0;
-      this.wake = rand(0, .2);
-      this.orbit = 0;
-      this.wasFrenzy = false;
-      this.size();
-      const gc = Math.ceil(Math.sqrt(n)), gr = Math.ceil(n / gc);
-      const fx = ((i % gc) + .5) / gc, fy = (Math.floor(i / gc) + .5) / gr;
-      this.place(W * clamp(fx + rand(-.1, .1), .08, .92), H * clamp(fy + rand(-.1, .1), .1, .9), rand(-Math.PI, Math.PI));
-      this.speed = this.baseSpeed;
-      this.pickGoal();
-    }
-    size() {
-      const base = clamp(Math.min(W * 1.1, H * 1.3) * .42, 170, 420);
-      this.L = base * (.55 + .5 * this.depth);
-      this.seg = this.L / (NP - 1);
-      this.baseSpeed = (62 + 46 * this.depth) * (W < 640 ? .8 : 1);
-    }
-    place(x, y, a) {
-      this.angle = a;
-      this.side = Math.cos(a) >= 0 ? 1 : -1;
-      this.rho = this.side > 0 ? this.tilt : Math.PI - this.tilt;
-      const fx = Math.cos(a), fy = Math.sin(a);
-      for (let i = 0; i < NP; i++) { this.pts[i].x = x - fx * this.seg * i; this.pts[i].y = y - fy * this.seg * i; }
-      this.updateTangents();
-    }
-    pickGoal() {
-      const h = this.pts[0];
-      const out = h.x < -.25 * W || h.x > 1.25 * W || h.y < -.25 * H || h.y > 1.25 * H;
-      let best = null, bestScore = -Infinity;
-      for (let k = 0; k < 5; k++) {
-        const gx = (out ? rand(.2, .8) : rand(-.15, 1.15)) * W;
-        const gy = (out ? rand(.2, .8) : rand(-.15, 1.15)) * H;
-        const d = Math.hypot(gx - h.x, gy - h.y);
-        const turn = Math.abs(wrapAngle(Math.atan2(gy - h.y, gx - h.x) - this.angle));
-        const score = Math.min(d, Math.max(W, H) * .7) - turn * 140 + rand(0, 60);
-        if (score > bestScore) { bestScore = score; best = { x: gx, y: gy }; }
-      }
-      this.goal = best;
-      this.goalUntil = T + rand(5, 11);
-    }
-    updateTangents() {
-      for (let i = 0; i < NP; i++) {
-        const a = this.pts[Math.max(0, i - 1)], b = this.pts[Math.min(NP - 1, i + 1)];
-        const dx = a.x - b.x, dy = a.y - b.y, l = Math.hypot(dx, dy) || 1;
-        this.tan[i].x = dx / l; this.tan[i].y = dy / l;
-      }
-    }
-    update(dt, others) {
-      const h = this.pts[0];
-      const frenzy = T < frenzyUntil;
-      if (frenzy) {
-        const a = T * .95 + this.orbit, R = Math.min(W, H) * .3;
-        this.goal = { x: W / 2 + Math.cos(a) * R * 1.4, y: H / 2 + Math.sin(a) * R * .85 };
-      } else {
-        if (this.wasFrenzy) this.pickGoal();
-        if (T > this.goalUntil || Math.hypot(this.goal.x - h.x, this.goal.y - h.y) < this.L * .5) this.pickGoal();
-      }
-      this.wasFrenzy = frenzy;
-
-      let vx = this.goal.x - h.x, vy = this.goal.y - h.y;
-      const gd = Math.hypot(vx, vy) || 1; vx /= gd; vy /= gd;
-      this.wanderPhase += dt * .5;
-      const wa = (Math.sin(this.wanderPhase + this.seed) * .5 + Math.sin(this.wanderPhase * 2.37 + this.seed * 1.3) * .3) * (frenzy ? .2 : 1);
-      const cw = Math.cos(wa), sw = Math.sin(wa);
-      [vx, vy] = [vx * cw - vy * sw, vx * sw + vy * cw];
-
-      let flee = 0;
-      const rep = (rx, ry, R, k) => {
-        const dx = h.x - rx, dy = h.y - ry, d = Math.hypot(dx, dy);
-        if (d < R && d > .01) { const w = 1 - d / R; vx += (dx / d) * w * w * k; vy += (dy / d) * w * w * k; return w; }
-        return 0;
-      };
-      if (pointer.active) flee = Math.max(flee, rep(pointer.x, pointer.y, 140 + this.L * .35, 3));
-      for (const s of startles) if (T < s.until) flee = Math.max(flee, rep(s.x, s.y, 320, 5));
-      for (const o of others) if (o !== this) { const p = o.pts[8]; rep(p.x, p.y, (this.L + o.L) * .3, 1.2); }
-
-      const desired = Math.atan2(vy, vx);
-      const diff = wrapAngle(desired - this.angle);
-      const maxTurn = (frenzy ? 2 : 1.15 + flee * 1.6) * dt;
-      const turn = clamp(diff, -maxTurn, maxTurn);
-      this.angle = wrapAngle(this.angle + turn);
-      this.turn = mix(this.turn, turn / Math.max(dt, 1e-4), Math.min(1, dt * 3));
-
-      const motion = reduce.matches ? .45 : 1;
-      const target = this.baseSpeed * (1 + .16 * Math.sin(T * .55 + this.seed)) * (frenzy ? 1.9 : 1) * (1 + flee * 1.1) * motion;
-      this.speed = mix(this.speed, target, Math.min(1, dt * (flee > 0 ? 4 : 1.2)));
-      h.x += Math.cos(this.angle) * this.speed * dt;
-      h.y += Math.sin(this.angle) * this.speed * dt;
-      for (let i = 1; i < NP; i++) {
-        const a = this.pts[i - 1], b = this.pts[i];
-        const dx = b.x - a.x, dy = b.y - a.y, l = Math.hypot(dx, dy) || 1;
-        b.x = a.x + (dx / l) * this.seg; b.y = a.y + (dy / l) * this.seg;
-      }
-      this.updateTangents();
-
-      const freq = .55 + 1.8 * (this.speed / this.L);
-      this.phase += dt * Math.PI * 2 * freq;
-
-      const c = Math.cos(this.angle);
-      if (c > .25) this.side = 1; else if (c < -.25) this.side = -1;
-      const bank = clamp(Math.abs(this.turn) * .35, 0, .45);
-      const tilt = clamp(this.tilt + .22 * Math.sin(T * .17 + this.seed) + bank, .12, 1.5);
-      this.rho = mix(this.rho, this.side > 0 ? tilt : Math.PI - tilt, Math.min(1, dt * 1.3));
-
-      this.wake -= dt;
-      if (this.wake <= 0) {
-        this.wake = rand(.08, .22) / (frenzy ? 2 : 1);
-        const p = this.pts[NP - 1];
-        if (p.x > -20 && p.x < W + 20 && p.y > -20 && p.y < H + 20) {
-          spawnBubble(p.x + rand(-6, 6), p.y + rand(-6, 6), {
-            vx: -Math.cos(this.angle) * rand(4, 14) + rand(-5, 5),
-            vy: -Math.sin(this.angle) * rand(4, 14) + rand(-5, 5) - 4,
-            life: rand(.8, 1.7), chars: ".'-.", alpha: .3 + .2 * this.depth, rise: 6,
-          });
-        }
-      }
-    }
-    onScreen() {
-      const m = this.L * .3;
-      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for (const p of this.pts) { if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x; if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y; }
-      return x1 > -m && x0 < W + m && y1 > -m && y0 < H + m;
-    }
-    frameAt(s) {
-      const fi = clamp(s, 0, 1) * (NP - 1);
-      let i = Math.floor(fi); if (i >= NP - 1) i = NP - 2;
-      const t = fi - i;
-      const a = this.pts[i], b = this.pts[i + 1], ta = this.tan[i], tb = this.tan[i + 1];
-      let fx = mix(ta.x, tb.x, t), fy = mix(ta.y, tb.y, t);
-      const fl = Math.hypot(fx, fy) || 1; fx /= fl; fy /= fl;
-      const cr = Math.cos(this.rho), sr = Math.sin(this.rho);
-      const r0 = fy * sr, r1 = -fx * sr, r2 = -cr;
-      const wig = this.L * .072 * (.07 + .93 * s * s) * Math.sin(this.phase - 5.2 * s);
-      return {
-        x: mix(a.x, b.x, t) + r0 * wig, y: mix(a.y, b.y, t) + r1 * wig, z: r2 * wig,
-        u0: cr * fy, u1: -cr * fx, u2: sr, r0, r1, r2,
-      };
-    }
-    pt(F, up, side) {
-      const L = this.L;
-      return [F.x + (F.u0 * up + F.r0 * side) * L, F.y + (F.u1 * up + F.r1 * side) * L, F.z + (F.u2 * up + F.r2 * side) * L];
-    }
-    tone(base, shade, haze) {
-      return [
-        clamp(mix(base[0] * shade, HAZE[0], haze), 0, 255),
-        clamp(mix(base[1] * shade, HAZE[1], haze), 0, 255),
-        clamp(mix(base[2] * shade, HAZE[2], haze), 0, 255),
-      ];
-    }
-    draw(g, lineW) {
-      const L = this.L, pal = this.pal, haze = (1 - this.depth) * .5, polys = [];
-      const frames = RING.map((R) => this.frameAt(R.s));
-      const rings = frames.map((F, j) => {
-        const R = RING[j], out = [];
-        for (let k = 0; k < NR; k++) {
-          const c = COS[k];
-          out.push(this.pt(F, (c >= 0 ? c * R.ht : c * R.hb) + R.lift, SIN[k] * R.w));
-        }
-        return out;
-      });
-
-      for (let j = 0; j < RING.length - 1; j++) {
-        const A = rings[j], B = rings[j + 1], Fa = frames[j], Fb = frames[j + 1];
-        const cx = (Fa.x + Fb.x) / 2, cy = (Fa.y + Fb.y) / 2, cz = (Fa.z + Fb.z) / 2;
-        for (let k = 0; k < NR; k++) {
-          const k2 = (k + 1) % NR;
-          const p0 = A[k], p1 = A[k2], p2 = B[k2], p3 = B[k];
-          const mx = (p0[0] + p1[0] + p2[0] + p3[0]) / 4, my = (p0[1] + p1[1] + p2[1] + p3[1]) / 4, mz = (p0[2] + p1[2] + p2[2] + p3[2]) / 4;
-          const d1x = p2[0] - p0[0], d1y = p2[1] - p0[1], d1z = p2[2] - p0[2];
-          const d2x = p3[0] - p1[0], d2y = p3[1] - p1[1], d2z = p3[2] - p1[2];
-          let nx = d1y * d2z - d1z * d2y, ny = d1z * d2x - d1x * d2z, nz = d1x * d2y - d1y * d2x;
-          if (nx * (mx - cx) + ny * (my - cy) + nz * (mz - cz) < 0) { nx = -nx; ny = -ny; nz = -nz; }
-          const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
-          if (nz < -.05) continue;
-          const lam = Math.max(0, nx * LD[0] + ny * LD[1] + nz * LD[2]);
-          const dors = (COS[k] + COS[k2]) / 2;
-          const albedo = mixRGB(pal.belly, pal.dorsal, smooth(-.5, .15, dors));
-          const shade = (.4 + .6 * lam) * (.72 + .28 * Math.max(0, nz));
-          polys.push({ pts: [p0, p1, p2, p3], z: mz, col: this.tone(albedo, shade, haze) });
-        }
-      }
-
-      const P = (s, up, side) => this.pt(this.frameAt(s), up, side);
-      const finCol = mixRGB(pal.dorsal, [8, 52, 26], .18);
-      const pecCol = mixRGB(pal.dorsal, pal.belly, .22);
-      const fin = (pts, base) => {
-        const a = pts[0], m = pts[Math.floor(pts.length / 2)], l = pts[pts.length - 1];
-        const ux = m[0] - a[0], uy = m[1] - a[1], uz = m[2] - a[2];
-        const vx = l[0] - a[0], vy = l[1] - a[1], vz = l[2] - a[2];
-        let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-        const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
-        const lam = Math.abs(nx * LD[0] + ny * LD[1] + nz * LD[2]);
-        let z = 0; for (const p of pts) z += p[2];
-        polys.push({ pts, z: z / pts.length + .5, col: this.tone(base, .42 + .58 * lam, haze) });
-      };
-      fin([P(.33, ht(.33) * .85, 0), P(.41, ht(.41) + .075, 0), P(.5, .215, 0), P(.465, ht(.465) + .05, 0), P(.475, ht(.475) * .85, 0)], finCol);
-      fin([P(.715, ht(.715) * .85, 0), P(.775, ht(.775) + .045, 0), P(.765, ht(.765) * .85, 0)], finCol);
-      fin([P(.83, ht(.83) * .85, 0), P(.92, .085, 0), P(1, .2, 0), P(.97, .11, 0), P(.945, .035, 0), P(.925, 0, 0)], finCol);
-      fin([P(.925, 0, 0), P(.965, -.045, 0), P(.99, -.115, 0), P(.92, -.065, 0), P(.855, -hb(.855) * .85, 0)], finCol);
-      fin([P(.76, -hb(.76) * .85, 0), P(.805, -hb(.805) - .04, 0), P(.8, -hb(.8) * .85, 0)], finCol);
-      for (const sg of [-1, 1]) {
-        fin([P(.23, -.05, sg * .07), P(.32, -.1, sg * .17), P(.43, -.14, sg * .25), P(.31, -.06, sg * .065)], pecCol);
-        fin([P(.62, -.05, sg * .035), P(.68, -.085, sg * .07), P(.67, -.045, sg * .03)], finCol);
-      }
-
-      polys.sort((a, b) => a.z - b.z);
-      g.lineJoin = "round";
-      g.lineWidth = lineW;
-      for (const p of polys) {
-        const c = `rgb(${p.col[0] | 0},${p.col[1] | 0},${p.col[2] | 0})`;
-        g.fillStyle = c; g.strokeStyle = c;
-        g.beginPath();
-        g.moveTo(p.pts[0][0], p.pts[0][1]);
-        for (let i = 1; i < p.pts.length; i++) g.lineTo(p.pts[i][0], p.pts[i][1]);
-        g.closePath(); g.fill(); g.stroke();
-      }
-
-      for (const sg of [-1, 1]) {
-        const F = this.frameAt(.075);
-        const facing = sg * F.r2;
-        if (facing < -.25) continue;
-        const e = this.pt(F, .035, sg * .066);
-        g.fillStyle = "#020a05";
-        g.beginPath(); g.arc(e[0], e[1], Math.max(L * .011, 1.5), 0, Math.PI * 2); g.fill();
-        if (facing > .2) {
-          g.strokeStyle = "rgba(6,40,20,.8)";
-          g.lineWidth = Math.max(L * .005, 1);
-          for (let q = 0; q < 5; q++) {
-            const s = .2 + q * .017, F2 = this.frameAt(s), ww = wd(s) * .96;
-            const a = this.pt(F2, .035, sg * ww), b = this.pt(F2, -.035, sg * ww);
-            g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
-          }
-        }
-      }
-    }
-  }
-
-  function spawnBubble(x, y, o = {}) {
-    if (bubbles.length > 900) return;
-    const life = o.life ?? rand(1.2, 2.2);
-    bubbles.push({
-      x, y, vx: o.vx ?? rand(-6, 6), vy: o.vy ?? rand(-30, -16), life, max: life,
-      ch: o.ch ?? null, chars: o.chars ?? "Oo°.", alpha: o.alpha ?? .55, rise: o.rise ?? 14,
-      delay: o.delay ?? 0, seed: Math.random() * 10,
-    });
-  }
-  function seedPlankton() {
-    plankton = [];
-    const clusters = Math.max(6, Math.round((COLS * ROWS) / 650));
-    for (let c = 0; c < clusters; c++) {
-      const cx = rand(0, W), cy = rand(0, H), n = Math.floor(rand(2, 8)), horiz = Math.random() < .6;
-      const ch = Math.random() < .55 ? "-" : pick([".", "·", "'", ":", "_", "."]);
-      const vx = rand(-5, 5), vy = rand(-3, 2);
-      for (let i = 0; i < n; i++) {
-        plankton.push({
-          x: cx + (horiz ? i * C * rand(1.4, 2.2) : rand(-2, 2) * C),
-          y: cy + (horiz ? rand(-.4, .4) * C : i * C * rand(1, 1.8)),
-          vx, vy, px: 0, py: 0,
-          ch: Math.random() < .8 ? ch : pick([".", "-", "·"]),
-          a: rand(.16, .48), tw: rand(.3, 1.2), seed: rand(0, 10),
-        });
-      }
-    }
-  }
-
-  function desiredCount() { return clamp(Math.round((W * H) / 260000), 3, 5); }
-  function resize() {
-    const r = stage.getBoundingClientRect();
-    W = Math.max(1, r.width); H = Math.max(1, r.height);
-    DPR = Math.min(window.devicePixelRatio || 1, 2);
-    C = W < 640 ? 10 : 12;
-    stage.style.setProperty("--cell", C + "px");
-    COLS = Math.ceil(W / C); ROWS = Math.ceil(H / C);
-    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
-    buf.width = layer.width = COLS * SS;
-    buf.height = layer.height = ROWS * SS;
-    occ = new Float32Array(COLS * ROWS);
-    stamp = new Uint32Array(COLS * ROWS);
-    glyphFont = `500 ${Math.round(C * .8)}px "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace`;
-    const n = desiredCount();
-    while (sharks.length > n) sharks.pop();
-    while (sharks.length < n) sharks.push(new Shark(sharks.length, n));
-    sharks.forEach((s) => s.size());
-    seedPlankton();
-  }
-
-  function simulate(dt) {
-    T += dt;
-    if (flashing) frenzyUntil = Math.max(frenzyUntil, T + 1);
-    for (const s of sharks) s.update(dt, sharks);
-    for (let i = startles.length - 1; i >= 0; i--) if (T > startles[i].until) startles.splice(i, 1);
-
-    const damp = Math.exp(-dt * 1.6);
-    for (const p of plankton) {
-      for (const s of sharks) {
-        for (const idx of [6, 14]) {
-          const q = s.pts[idx], dx = p.x - q.x, dy = p.y - q.y, R = s.L * .22, d = Math.hypot(dx, dy);
-          if (d < R && d > .01) {
-            const w = 1 - d / R;
-            p.px += ((dx / d) * 70 + Math.cos(s.angle) * s.speed * .5) * w * dt * 6;
-            p.py += ((dy / d) * 70 + Math.sin(s.angle) * s.speed * .5) * w * dt * 6;
-          }
-        }
-      }
-      p.px *= damp; p.py *= damp;
-      p.x += (p.vx + Math.sin(T * .3 + p.seed) * 3 + p.px) * dt;
-      p.y += (p.vy + Math.cos(T * .23 + p.seed) * 2 + p.py) * dt;
-      if (p.x < -24) p.x += W + 48; else if (p.x > W + 24) p.x -= W + 48;
-      if (p.y < -24) p.y += H + 48; else if (p.y > H + 24) p.y -= H + 48;
-    }
-
-    for (let i = bubbles.length - 1; i >= 0; i--) {
-      const b = bubbles[i];
-      if (b.delay > 0) { b.delay -= dt; continue; }
-      b.life -= dt;
-      if (b.life <= 0) { bubbles[i] = bubbles[bubbles.length - 1]; bubbles.pop(); continue; }
-      b.vy -= b.rise * dt;
-      b.vy *= 1 - dt * .6;
-      b.vx *= 1 - dt * .8;
-      b.x += (b.vx + Math.sin(T * 3 + b.seed) * 6) * dt;
-      b.y += b.vy * dt;
-    }
-  }
-
-  const RAMP = [".", "'", ":", ";", "o", "t", "S", "X", "%", "8", "@", "#"];
-  const EDGE = [".", "'", "o", ".", ":"];
-  const TINTS = [[150, 255, 190], [190, 255, 90], [60, 214, 190], [20, 110, 60], [220, 255, 140]];
-
-  function render() {
-    frameId++;
-    const bw = buf.width, bh = buf.height, sc = SS / C;
-    bctx.setTransform(1, 0, 0, 1, 0, 0);
-    bctx.globalAlpha = 1;
-    bctx.clearRect(0, 0, bw, bh);
-    const order = sharks.slice().sort((a, b) => a.depth - b.depth);
-    for (const s of order) {
-      if (!s.onScreen()) continue;
-      lctx.setTransform(1, 0, 0, 1, 0, 0);
-      lctx.clearRect(0, 0, bw, bh);
-      lctx.setTransform(sc, 0, 0, sc, 0, 0);
-      s.draw(lctx, .55 / sc);
-      bctx.globalAlpha = .5 + .5 * s.depth;
-      bctx.drawImage(layer, 0, 0);
-    }
-    bctx.globalAlpha = 1;
-    const data = bctx.getImageData(0, 0, bw, bh).data;
-
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    ctx.clearRect(0, 0, W, H);
-    ctx.font = glyphFont;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    const Pp = theme.paper, dark = theme.dark;
-    const tq = Math.floor(T * 5), tq2 = Math.floor(T * 1.5);
-    const area = SS * SS, minA = .04 * 255 * area, half = C / 2, oy = half + .5;
-
-    for (let cy = 0; cy < ROWS; cy++) {
-      for (let cx = 0; cx < COLS; cx++) {
-        const ci = cy * COLS + cx;
-        let sa = 0, sr = 0, sg = 0, sb = 0;
-        const bx = cx * SS, by = cy * SS;
-        for (let dy = 0; dy < SS; dy++) {
-          let o = ((by + dy) * bw + bx) * 4;
-          for (let dx = 0; dx < SS; dx++, o += 4) {
-            const a = data[o + 3];
-            if (a) { sa += a; sr += data[o] * a; sg += data[o + 1] * a; sb += data[o + 2] * a; }
-          }
-        }
-        if (sa < minA) { occ[ci] = 0; continue; }
-        const cov = sa / (255 * area);
-        occ[ci] = cov;
-        let r = sr / sa, g = sg / sa, b = sb / sa;
-        if (cov > .45 && hash(cx, cy, tq2 + 7919) < .045) {
-          const tt = TINTS[Math.floor(hash(cx, cy, tq2) * TINTS.length)];
-          r = mix(r, tt[0], .5); g = mix(g, tt[1], .5); b = mix(b, tt[2], .5);
-        }
-        const lum = (.299 * r + .587 * g + .114 * b) / 255;
-        if (dark) { r = 8 + r * .92; g = 16 + g * .96; b = 12 + b * .92; }
-        const n = hash(cx, cy, tq) - .5;
-        const jit = 1 + n * .12;
-        r = Math.min(255, r * jit); g = Math.min(255, g * jit); b = Math.min(255, b * jit);
-        const x = cx * C, y = cy * C;
-        const k = smooth(.2, .72, cov) * .94;
-
-        if (k < .1) {
-          ctx.fillStyle = `rgba(${r | 0},${g | 0},${b | 0},${clamp(cov * 2.8, 0, .85).toFixed(3)})`;
-          ctx.fillText(EDGE[Math.floor(hash(cx, cy, 31) * EDGE.length)], x + half, y + oy);
-          continue;
-        }
-        const tr = mix(Pp[0], r, k), tg = mix(Pp[1], g, k), tb = mix(Pp[2], b, k);
-        ctx.fillStyle = `rgb(${tr | 0},${tg | 0},${tb | 0})`;
-        ctx.fillRect(x + 1, y + 1, C - 1, C - 1);
-        const tl = (.299 * tr + .587 * tg + .114 * tb) / 255;
-        if (tl > .46) ctx.fillStyle = `rgb(${(tr * .36) | 0},${(tg * .36) | 0},${(tb * .38) | 0})`;
-        else ctx.fillStyle = `rgb(${mix(tr, 200, .6) | 0},${mix(tg, 255, .62) | 0},${mix(tb, 220, .6) | 0})`;
-        const d = clamp(cov * (1 - lum) * 1.18 + n * .14, 0, .999);
-        ctx.fillText(RAMP[Math.floor(d * RAMP.length)], x + half, y + oy);
-      }
-    }
-
-    const ink = theme.glow || theme.ink, inkS = `${ink[0]},${ink[1]},${ink[2]}`;
-    const drawP = (px, py, ch, a) => {
-      const cx = Math.floor(px / C), cy = Math.floor(py / C);
-      if (cx < 0 || cy < 0 || cx >= COLS || cy >= ROWS || a <= .01) return;
-      const ci = cy * COLS + cx;
-      if (occ[ci] > .12 || stamp[ci] === frameId) return;
-      stamp[ci] = frameId;
-      ctx.fillStyle = `rgba(${inkS},${a.toFixed(3)})`;
-      ctx.fillText(ch, cx * C + half, cy * C + oy);
-    };
-    for (const p of plankton) drawP(p.x, p.y, p.ch, p.a * (.55 + .45 * Math.sin(T * p.tw + p.seed)));
-    for (const b of bubbles) {
-      if (b.delay > 0) continue;
-      const f = b.life / b.max;
-      let ch;
-      if (b.ch) ch = f > .3 ? b.ch : f > .12 ? "." : "·";
-      else ch = b.chars[Math.min(b.chars.length - 1, Math.floor((1 - f) * b.chars.length))];
-      drawP(b.x, b.y, ch, b.alpha * Math.min(1, f * 2.5) * Math.min(1, (b.max - b.life) * 6));
-    }
-  }
-
-  let last = performance.now(), acc = 0, raf = 0;
-  function frame(now) {
-    raf = requestAnimationFrame(frame);
-    let dt = (now - last) / 1000; last = now;
-    if (dt > .1) dt = .1;
-    simulate(dt);
-    acc += dt;
-    const interval = reduce.matches ? 1 / 12 : 1 / 30;
-    if (acc < interval) return;
-    acc %= interval;
-    render();
-  }
-  function start() { cancelAnimationFrame(raf); last = performance.now(); raf = requestAnimationFrame(frame); }
-  document.addEventListener("visibilitychange", () => { if (document.hidden) cancelAnimationFrame(raf); else start(); });
-
-  window.addEventListener("pointermove", (e) => {
-    const dx = e.clientX - pointer.lx, dy = e.clientY - pointer.ly;
-    pointer.x = e.clientX; pointer.y = e.clientY; pointer.lx = e.clientX; pointer.ly = e.clientY;
-    pointer.active = true;
-    pointer.travel += Math.hypot(dx, dy);
-    if (pointer.travel > 70 && e.target === canvas) {
-      pointer.travel = 0;
-      spawnBubble(e.clientX, e.clientY, { chars: "o°.", life: rand(.9, 1.5), alpha: .42, vy: rand(-22, -12) });
-    }
-  }, { passive: true });
-  document.addEventListener("pointerleave", () => { pointer.active = false; });
-  window.addEventListener("blur", () => { pointer.active = false; });
-  canvas.addEventListener("pointerdown", (e) => {
-    const x = e.clientX, y = e.clientY;
-    const n = reduce.matches ? 4 : 11;
-    for (let i = 0; i < n; i++) spawnBubble(x + rand(-8, 8), y + rand(-8, 8), { vx: rand(-34, 34), vy: rand(-55, -18), life: rand(1, 2), chars: "Oo°.", alpha: .6 });
-    startles.push({ x, y, until: T + 1.4 });
-  });
-
-  // public hooks for the flasher
-  window.SharkSea = {
-    frenzy(sec = 3.4) {
-      frenzyUntil = T + (reduce.matches ? sec * .5 : sec);
-      sharks.forEach((s, k) => { s.orbit = (k / Math.max(1, sharks.length)) * Math.PI * 2 + rand(-.3, .3); });
-    },
-    setFlashing(b) { flashing = !!b; if (b) this.frenzy(4); },
-    burst(x, y, n = 12) {
-      const m = reduce.matches ? Math.ceil(n / 3) : n;
-      for (let i = 0; i < m; i++) spawnBubble(x + rand(-10, 10), y + rand(-10, 10), { vx: rand(-34, 34), vy: rand(-58, -20), life: rand(1, 2.2), chars: "Oo°.", alpha: .62 });
-      startles.push({ x, y, until: T + 1.4 });
-    },
-  };
-
-  readTheme();
-  matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", readTheme);
-  resize();
-  let rt = 0;
-  window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(resize, 120); });
-  for (let i = 0; i < 45; i++) simulate(1 / 30);
-  render();
-  start();
-  if (document.fonts && document.fonts.load) document.fonts.load(glyphFont).catch(() => {});
-})();
-</script>
-
-<!-- ============================ flasher ============================ -->
 <script type="module">
-import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.7.0/bundle.js";
+// Load after rendering so download failures leave a readable, retryable page.
+let ESPLoader, Transport;
+try {
+  ({ ESPLoader, Transport } = await import("https://cdn.jsdelivr.net/npm/esptool-js@0.7.0/bundle.js"));
+} catch (error) {
+  document.getElementById("go").disabled = true;
+  document.getElementById("goLabel").textContent = "Flasher unavailable — reload to retry";
+  const notice = document.getElementById("notice");
+  notice.hidden = false;
+  notice.textContent = "Could not load the USB installer. Check your connection, then reload this page.";
+  throw error;
+}
 
 const FW_URL    = "firmware/v1.7.29/full-16MB.bin";
 const FW_ADDR   = 0x0;
@@ -905,8 +165,7 @@ const $ = (id) => document.getElementById(id);
 const go = $("go"), goLabel = $("goLabel"), eraseEl = $("erase");
 const logoRow = $("logoRow"), logoFirstEl = $("logoFirst");
 const progress = $("progress"), pct = $("pct"), statusEl = $("status");
-const atrack = $("atrack"), aRow0 = $("aRow0"), aRow1 = $("aRow1");
-const still = matchMedia("(prefers-reduced-motion: reduce)");
+const atrack = $("atrack"), aRow0 = $("aRow0");
 const logEl = $("log"), logToggle = $("logtoggle"), notice = $("notice"), powerHelp = $("powerHelp");
 
 let busy = false;
@@ -929,101 +188,21 @@ function setProgress(written, total) {
   pct.textContent = (p * 100).toFixed(0) + "%";
 }
 
-// ---- ASCII progress bar: a fin cuts along the water line, water fills in behind it ----
-// modes: "scan" (busy, no % yet — the fin patrols), "progress", "ok", "err" (frozen, red), "idle" (static)
-const bar = { mode: "idle", p: 0, t: 0, timer: 0, charW: 0 };
-const FIN_W = 3;
-const FIN_R = ["|\\ ", "| \\"];   //  |\    swimming right
-const FIN_L = [" /|", "/ |"];     //  | \
-const WAVE = "_.-~";
-
-function h01(i, k) {
-  let h = Math.imul(i + 0x9e37, 2654435761) ^ Math.imul(k | 0, 1597334677);
-  h ^= h >>> 15; h = Math.imul(h, 2246822519); h ^= h >>> 13;
-  return (h >>> 0) / 4294967296;
-}
-function barCols() {
-  if (!bar.charW) {
-    const probe = document.createElement("span");
-    probe.textContent = "0000000000";
-    probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
-    atrack.appendChild(probe);
-    bar.charW = probe.getBoundingClientRect().width / 10;
-    probe.remove();
-  }
-  const cs = getComputedStyle(atrack);
-  const inner = atrack.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-  return bar.charW > 0 ? Math.max(12, Math.floor(inner / bar.charW)) : 40;
-}
-function runsHtml(ch, cls) {
-  let out = "", cur = null, buf = "";
-  const flush = () => { if (buf) out += '<span class="' + cur + '">' + buf.replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</span>"; };
-  for (let i = 0; i < ch.length; i++) {
-    if (cls[i] !== cur) { flush(); cur = cls[i]; buf = ""; }
-    buf += ch[i];
-  }
-  flush();
-  return out;
-}
-function renderBar() {
-  if (!progress.classList.contains("show") || !atrack.clientWidth) return;
-  const cols = barCols(), t = bar.t, calm = still.matches || bar.mode === "err" || bar.mode === "idle";
-  const span = Math.max(1, cols - FIN_W);
-  let x, dir = 1;
-  if (bar.mode === "scan") {
-    x = calm ? 0 : Math.round((Math.sin(t * 1.4) * 0.5 + 0.5) * span);
-    dir = calm || Math.cos(t * 1.4) >= 0 ? 1 : -1;
-  } else {
-    x = Math.round(clamp(bar.p, 0, 1) * span);
-  }
-  const c0 = new Array(cols).fill(" "), k0 = new Array(cols).fill("a-s");
-  const c1 = new Array(cols), k1 = new Array(cols);
-  for (let i = 0; i < cols; i++) {
-    // water fills behind the fin; while scanning there's only a short wake
-    const water = bar.mode === "scan"
-      ? (dir > 0 ? i < x && i >= x - 5 : i >= x + FIN_W && i < x + FIN_W + 5)
-      : i < x;
-    if (water) {
-      const v = calm ? 0.4 : Math.sin(i * 0.55 - t * 5) * 0.65 + Math.sin(i * 1.7 + t * 2.1) * 0.35;
-      const lv = clamp(Math.floor((v + 1) * 2), 0, 3);
-      c1[i] = WAVE[lv]; k1[i] = lv >= 2 ? "a-w" : "a-w2";
-    } else {
-      // plankton ahead of the fin, twinkling like the sea behind the card
-      const h = h01(i, 7), on = calm || Math.sin(t * 1.7 + h * 40) > -0.4;
-      c1[i] = h < 0.62 || !on ? " " : "·.'-·"[Math.floor(h * 97) % 5];
-      k1[i] = "a-p";
-    }
-  }
-  // spray kicked up just behind the fin while it moves
-  if (!calm && bar.mode !== "ok") {
-    const frame = Math.floor(t * 9);
-    for (let d = 1; d <= 3; d++) {
-      const i = dir > 0 ? x - d : x + FIN_W - 1 + d;
-      if (i >= 0 && i < cols && h01(i, frame) > 0.55) c0[i] = ".,'`"[Math.floor(h01(i, frame + 3) * 4)];
-    }
-  }
-  const F = dir > 0 ? FIN_R : FIN_L;
-  for (let j = 0; j < FIN_W && x + j < cols; j++) {
-    c0[x + j] = F[0][j]; k0[x + j] = "a-f";
-    c1[x + j] = F[1][j]; k1[x + j] = "a-f";
-  }
-  aRow0.innerHTML = runsHtml(c0, k0);
-  aRow1.innerHTML = runsHtml(c1, k1);
-}
+// Progress reflects bytes written; connecting/erasing has no invented percent.
+const bar = { p: 0 };
 function barSet(mode, p) {
-  bar.mode = mode;
-  if (p != null) bar.p = p;
+  if (p != null) bar.p = clamp(p, 0, 1);
+  atrack.dataset.mode = mode;
   atrack.classList.toggle("err", mode === "err");
-  progress.classList.toggle("err", mode === "err");
-  atrack.setAttribute("aria-valuenow", String(Math.round(bar.p * 100)));
-  if (mode === "scan") atrack.setAttribute("aria-valuetext", "working"); else atrack.removeAttribute("aria-valuetext");
-  const animate = !still.matches && (mode === "scan" || mode === "progress" || mode === "ok");
-  if (animate && !bar.timer) bar.timer = setInterval(() => { bar.t += 0.066; renderBar(); }, 66);
-  if (!animate && bar.timer) { clearInterval(bar.timer); bar.timer = 0; }
-  renderBar();
+  aRow0.style.width = (bar.p * 100) + "%";
+  if (mode === "scan") {
+    atrack.removeAttribute("aria-valuenow");
+    atrack.setAttribute("aria-valuetext", "Working");
+  } else {
+    atrack.setAttribute("aria-valuenow", String(Math.round(bar.p * 100)));
+    atrack.removeAttribute("aria-valuetext");
+  }
 }
-window.addEventListener("resize", () => renderBar());
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { bar.charW = 0; renderBar(); });
 
 let logBuf = "";
 function log(text, inline) {
@@ -1044,59 +223,13 @@ function showNotice(msg, hard) {
   notice.innerHTML = msg;
 }
 
-// ---- button: the label decodes out of ASCII glyphs, and a bubble spinner runs while busy ----
-const GLYPHS = ".':;otSX%8@#";
-let labelText = "Connect & Flash", decodeTimer = 0;
-function setLabel(text) {
-  labelText = text;
-  go.setAttribute("aria-label", text);
-  clearInterval(decodeTimer);
-  goLabel.style.width = "";
-  goLabel.textContent = text;
-  if (still.matches) return;
-  goLabel.style.width = Math.ceil(goLabel.getBoundingClientRect().width) + "px";  // no jitter while glyphs flip
-  const chars = Array.from(text);
-  let f = 0;
-  decodeTimer = setInterval(() => {
-    const settled = Math.floor((++f * chars.length) / 14);  // resolves left to right in ~0.4 s
-    goLabel.textContent = chars.map((c, i) =>
-      i < settled || c === " " ? c : GLYPHS[(Math.random() * GLYPHS.length) | 0]).join("");
-    if (settled >= chars.length) { clearInterval(decodeTimer); goLabel.textContent = text; goLabel.style.width = ""; }
-  }, 28);
-}
-go.addEventListener("pointerenter", () => { if (!go.disabled) setLabel(labelText); });
-go.addEventListener("focus", () => { if (!go.disabled) setLabel(labelText); });
-
-const BUBBLES = ["   ", ".  ", "o. ", "Oo.", "°Oo", " °O", "  °"];
-let spinTimer = 0;
-function setBusy(b, label) {
-  busy = b;
-  go.disabled = b;
-  go.classList.toggle("busy", b);
-  setLabel(label || "Connect & Flash");
-  clearInterval(spinTimer); spinTimer = 0;
-  const icon = go.querySelector("svg, .aspin");
-  if (b) {
-    const sp = icon && icon.classList.contains("aspin") ? icon : spinnerEl();
-    if (sp !== icon && icon) icon.replaceWith(sp);
-    let i = 1;
-    sp.textContent = BUBBLES[i];
-    if (!still.matches) spinTimer = setInterval(() => { sp.textContent = BUBBLES[i = (i + 1) % BUBBLES.length]; }, 110);
-  } else if (icon && icon.classList.contains("aspin")) {
-    icon.replaceWith(boltEl());
-  }
-}
-function spinnerEl() { const s = document.createElement("span"); s.className = "aspin"; s.setAttribute("aria-hidden", "true"); return s; }
-function boltEl() {
-  const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("width", "17"); svg.setAttribute("height", "17");
-  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "2.1");
-  svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
-  const p = document.createElementNS(ns, "path");
-  p.setAttribute("d", "M13 2 4.5 13H11l-1 9 8.5-11H12l1-9z");
-  svg.appendChild(p); return svg;
+function setBusy(value, label) {
+  busy = value;
+  go.disabled = value;
+  go.setAttribute("aria-busy", String(value));
+  goLabel.textContent = label || "Connect & Flash";
+  eraseEl.disabled = value;
+  logoFirstEl.disabled = value;
 }
 
 function escapeHtml(s) {
@@ -1106,7 +239,7 @@ function escapeHtml(s) {
 // Browser support gate
 if (!("serial" in navigator)) {
   go.disabled = true;
-  showNotice("This browser can't flash over USB. Open this page in <b>Chrome</b> or <b>Edge</b> on a desktop computer (Web Serial isn't available on Firefox, Safari, or mobile).", true);
+  showNotice("This browser can't flash over USB. Open this page in a desktop browser with Web Serial, such as <b>Chrome</b> or <b>Edge</b>.", true);
 }
 
 // Reveal the "logo first" option only when a logo image has actually been published.
@@ -1164,6 +297,11 @@ const S3_OUT1_W1TS      = 0x60004014;  // write-1-to-set, GPIO32..53
 const S3_ENABLE1_W1TS   = 0x60004030;
 const GPIO46_BIT        = 1 << (46 - 32);
 
+function requireS3(esploader) {
+  if (!esploader.chip || esploader.chip.CHIP_NAME !== "ESP32-S3")
+    throw new Error("This image requires an ESP32-S3. No firmware was written.");
+}
+
 async function keepBoardPowered(esploader) {
   if (!esploader.chip || esploader.chip.CHIP_NAME !== "ESP32-S3") return;
   try {
@@ -1212,9 +350,6 @@ async function writeImage(esploader, data, address, label, eraseAll) {
 function finishOk() {
   barSet("ok", 1); pct.textContent = "100%";
   setStatus("Done — SHARKDIV is flashed. It'll reboot into the firmware now.", "ok");
-  SharkSea && SharkSea.frenzy(6);
-  const r = go.getBoundingClientRect();
-  SharkSea && SharkSea.burst(r.left + r.width / 2, r.top, 18);
   resumeFw = null;
   setBusy(false, "Flash again");
 }
@@ -1233,14 +368,12 @@ function fail(err) {
     progress.classList.remove("show");
     showNotice("The browser didn't open the port picker. Click <b>Connect &amp; Flash</b> again.", false);
   } else if (midWrite) {
-    // The port vanished or stopped answering while writing: on this board that is the
-    // battery chip cutting power, so point straight at the USB-only recovery steps.
+    // A transfer error may be cable, port or power related; retain the actual error log.
     barSet("err");
-    setStatus("Stopped at " + lastPct + "% — the board lost power.", "err");
+    setStatus("Stopped at " + lastPct + "% — transfer interrupted.", "err");
     log("ERROR during write at " + lastPct + "%: " + msg);
     showNotice(
-      "The flash stopped at <b>" + lastPct + "%</b> because the board <b>switched itself off</b> — " +
-      "its battery chip powers down when the board draws very little current.<br><br>" +
+      "The flash stopped at <b>" + lastPct + "%</b>. Check the cable and power. The board can switch itself off when its battery chip detects very little load.<br><br>" +
       "Fix: <b>unplug the battery</b> from the back, plug USB back in, tick <b>Erase flash first</b> and flash again. " +
       "Full steps are under <b>Switches off mid-flash</b> below.",
       true
@@ -1290,12 +423,9 @@ async function flash() {
     setStatus("Connecting… if this hangs: hold BOOT, tap RESET, release BOOT, then retry.");
     let chip = await esploader.main();
     log("connected: " + chip);
-    if (!/S3/i.test(String(chip))) log("note: expected an ESP32-S3; got \"" + chip + "\". Continuing anyway.");
+    requireS3(esploader);
     await keepBoardPowered(esploader);
 
-    SharkSea && SharkSea.setFlashing(true);
-    const rb = go.getBoundingClientRect();
-    SharkSea && SharkSea.burst(rb.left + rb.width / 2, rb.top + rb.height / 2, 14);
 
     const erase = eraseEl.checked;
 
@@ -1311,12 +441,12 @@ async function flash() {
       try {
         chip = await esploader.main();
         log("reconnected: " + chip);
+        requireS3(esploader);
         await keepBoardPowered(esploader);
       } catch (e2) {
         // Auto re-entry into download mode failed — hand off to a manual Continue step.
         log("auto-reconnect failed: " + (e2 && e2.message ? e2.message : e2));
         resumeFw = fw;
-        SharkSea && SharkSea.setFlashing(false);
         setStatus("Logo is on the screen. Now put the device in download mode and continue.", "ok");
         showNotice(
           "Blank firmware flashed ✔ &mdash; your device should light up now.<br><br>" +
@@ -1340,7 +470,6 @@ async function flash() {
   } catch (err) {
     fail(err);
   } finally {
-    SharkSea && SharkSea.setFlashing(false);
     if (transport) { try { await transport.disconnect(); } catch (_) {} }
   }
 }
@@ -1361,8 +490,8 @@ async function resumeFirmware() {
     setStatus("Connecting… if this hangs: hold BOOT, tap RESET, release BOOT, then retry.");
     const chip = await esploader.main();
     log("connected: " + chip);
+    requireS3(esploader);
     await keepBoardPowered(esploader);
-    SharkSea && SharkSea.setFlashing(true);
     await writeImage(esploader, fw, FW_ADDR, "Writing firmware", eraseEl.checked);
     setStatus("Rebooting the device…");
     await rebootIntoFirmware(esploader);
@@ -1370,12 +499,23 @@ async function resumeFirmware() {
   } catch (err) {
     fail(err);  // keeps resumeFw set, so the button stays "Continue — flash firmware"
   } finally {
-    SharkSea && SharkSea.setFlashing(false);
     if (transport) { try { await transport.disconnect(); } catch (_) {} }
   }
 }
 
 go.addEventListener("click", () => (resumeFw ? resumeFirmware() : flash()));
+</script>
+<script type="module">
+const button = document.querySelector('esp-web-install-button [slot="activate"]');
+try {
+  await import("https://unpkg.com/esp-web-tools@10.1.1/dist/web/install-button.js?module");
+  await customElements.whenDefined("esp-web-install-button");
+  button.disabled = false;
+  button.textContent = "Open ESP Web Tools";
+} catch (_) {
+  button.textContent = "ESP Web Tools unavailable";
+  document.getElementById("espToolsStatus").textContent = "Could not load the alternate installer. Reload to retry or use the main flasher.";
+}
 </script>
 </body>
 </html>

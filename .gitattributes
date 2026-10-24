@@ -1,0 +1,2 @@
+# Preserve the upstream reference header byte-for-byte, including comment spaces.
+tests/reference/opendroneid/opendroneid.h whitespace=-blank-at-eol

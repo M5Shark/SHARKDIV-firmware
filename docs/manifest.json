@@ -1,0 +1,12 @@
+{
+  "name": "SHARKDIV (ESP32-DIV V2)",
+  "version": "1.7.29",
+  "new_install_prompt_erase": true,
+  "new_install_improv_wait_time": 0,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [{ "path": "firmware/v1.7.29/full-16MB.bin", "offset": 0 }]
+    }
+  ]
+}

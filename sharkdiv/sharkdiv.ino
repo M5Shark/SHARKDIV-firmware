@@ -132,7 +132,7 @@ const char *bluetooth_page0_items[BT_PAGE0_FEATURES] = {
     "BLE Spoofer",
     "Sour Apple",
     "AirTag Spoofer",
-    "AirTag Sniffer",
+    "Find My Scanner",
     "Sniffer",
     "BLE Scanner",
     "BLE Rubber Ducky"};
@@ -147,7 +147,7 @@ static int s_pagedFooterFocus = -1;  // 0=back, 1=page btn, -1=none
 
 const int nrf_NUM_SUBMENU_ITEMS = 8;
 const char *nrf_submenu_items[nrf_NUM_SUBMENU_ITEMS] = {
-    "Scanner",
+    "Spectrum Scan",
     "Proto Kill",
     "ESB Sniffer",
     "ESB Replay",
@@ -903,16 +903,21 @@ bool isTouchNavButtonPressedEdge(int buttonPin) {
   }
 
   const bool down = isTouchNavSlotDown(navIdx);
+  const bool wasDown = s_touchNavHeld[navIdx];
+  s_touchNavHeld[navIdx] = down;
   if (down) {
     s_navTapLatchMs[navIdx] = millis();
-    s_navTapLatchNew[navIdx] = true;
+    // This press is observed directly. Consume its captured tap even while
+    // held so a level-based reader cannot rearm an additional edge.
+    s_navTapLatchNew[navIdx] = false;
+    return !wasDown;
   }
-  const bool edge = down && !s_touchNavHeld[navIdx];
-  s_touchNavHeld[navIdx] = down;
-  if (edge) {
-    return true;
+  if (wasDown) {
+    // Release completes the observed press; never replay it from the latch.
+    s_navTapLatchNew[navIdx] = false;
+    return false;
   }
-  // Deliver a captured tap exactly once, even if the finger is already up.
+  // Deliver an otherwise unseen captured tap once (including VM injection).
   if (s_navTapLatchNew[navIdx] && s_navTapLatchMs[navIdx] != 0 &&
       millis() - s_navTapLatchMs[navIdx] < 350) {
     s_navTapLatchNew[navIdx] = false;
@@ -1017,7 +1022,7 @@ unsigned long last_interaction_time = 0;
 int last_menu_index = -1;
 bool menu_initialized = false;
 
-// Home / More grid: two columns of 108x61 cards under the 20 px status bar,
+// Home / More grid: two columns of 108x61 cells under the 20 px status bar,
 // leaving a footer strip at the bottom. Touch hit-tests use the same values.
 const int COLUMN_WIDTH = 116;
 const int X_OFFSET_LEFT = 8;
@@ -1030,38 +1035,45 @@ const int TILE_H = 61;
 void displayOtherMenuGrid();
 void displayPagedSubmenu();
 
-// Brand card: 2x real icon, bold label, optional mono status line. The
-// focused card is solid green with ink text.
+// Fixed-width labels and compact icons stay readable on the 240 px panel.
 static void drawBrandTile(int x, int y, const unsigned char* icon, const char* label,
                           const char* status, bool sel) {
     drawSharkTile(x, y, TILE_W, TILE_H, sel);
     if (icon) {
-        drawBitmap2x(x + (TILE_W - 32) / 2, y + 4, icon, sel ? TFT_BLACK : UI_ICON);
+        tft.drawBitmap(x + 8, y + 8, icon, 16, 16, sel ? TFT_BLACK : UI_ICON);
     }
-    tft.setFreeFont(&FreeSansBold9pt7b);
-    tft.setTextDatum(C_BASELINE);
+    tft.setTextFont(2);
+    tft.setTextSize(1);
+    tft.setTextDatum(TL_DATUM);
     tft.setTextColor(sel ? TFT_BLACK : UI_TEXT);
-    tft.drawString(label, x + TILE_W / 2, y + (status ? 49 : 53));
+    tft.drawString(label, x + 8, y + 29);
     tft.setTextFont(1);
     if (status) {
-        tft.setTextDatum(TC_DATUM);
         tft.setTextColor(sel ? TFT_BLACK : UI_DIM_TEXT);
-        tft.drawString(status, x + TILE_W / 2, y + 52);
+        tft.drawString(status, x + 8, y + 47);
     }
     tft.setTextDatum(TL_DATUM);
 }
 
-// Bold sans label for list rows, on its baseline.
+// Use the built-in 16 px font; long labels fit inside their row.
 static void drawBrandRowLabel(int x, int baselineY, const char* text, uint16_t color) {
-    tft.setFreeFont(&FreeSansBold9pt7b);
-    tft.setTextDatum(L_BASELINE);
+    tft.setTextFont(2);
+    tft.setTextSize(1);
+    tft.setTextDatum(TL_DATUM);
     tft.setTextColor(color);
-    tft.drawString(text, x, baselineY);
+    String label(text);
+    const int available = tft.width() - x - 14;
+    if (tft.textWidth(label) > available) {
+        while (label.length() && tft.textWidth(label + "...") > available)
+            label.remove(label.length() - 1);
+        label += "...";
+    }
+    tft.drawString(label, x, baselineY - 15);
     tft.setTextFont(1);
     tft.setTextDatum(TL_DATUM);
 }
 
-// One submenu row: glass card (green when focused), icon, bold label.
+// One submenu row: flat divider, icon, label and a solid selection.
 static void drawSubmenuRow(int i, int yPos, bool sel) {
     drawSharkRowRail(yPos, 28, sel);
     if (active_submenu_icons[i]) {

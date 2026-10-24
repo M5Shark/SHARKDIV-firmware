@@ -40,17 +40,16 @@ uint16_t uiUniversalColor();
 #define L_Dark        0x4208
 #define L_Light       0xC618
 
-// SHARKDIV brand palette — the web flasher's tokens (phosphor green on black,
-// green-tinted ink and hairlines), nudged brighter where the ILI9341 would
-// crush the darkest values to black.
-#define BRAND_ACCENT  0x3F0F  // #3ee07f phosphor green
-#define BRAND_INK     0xEF9D  // #e9f3ec ink
-#define BRAND_MUTED   0x7CB1  // #7f958a secondary text
-#define BRAND_BAND    0x0881  // #0b100d header / nav band
-#define BRAND_CARD    0x0922  // #0e2416 card + key surface
-#define BRAND_LINE    0x19C5  // #1f3a2a hairline
-#define BRAND_GRID    0x1123  // #12261a background dot grid
-#define BRAND_WARN    0xFEA9  // #ffd54f amber
+// SHARKDIV instrument palette: neutral surfaces and legible white/grey text.
+// Green marks actionable controls and focus; amber remains a warning color.
+#define BRAND_ACCENT  0x3F0F  // green, readable behind black selection labels
+#define BRAND_INK     0xF7BE  // near-white primary text
+#define BRAND_MUTED   0xAD55  // grey secondary text
+#define BRAND_BAND    0x10A2  // graphite header / navigation band
+#define BRAND_CARD    0x18E3  // neutral control surface
+#define BRAND_LINE    0x4208  // visible grey separator on a small TFT
+#define BRAND_GRID    0x0000  // legacy token; decorative grid removed
+#define BRAND_WARN    0xFEA9  // amber
 
 // Default background for feature screens (separate from main menu background).
 // Currently black, but you can change this one define to restyle all features.
@@ -94,7 +93,7 @@ uint16_t uiUniversalColor();
 #define ESP32DIV_NAME "SHARKDIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.7.29"
+#define ESP32DIV_VERSION "v1.7.30-dev"
 #endif
 
 
