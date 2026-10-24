@@ -1,7 +1,8 @@
 # Integration status — v1.7.30-flock
 
 Reviewed 2026-10-24 against the supplied upstream projects. This is a source
-development version; it has not been released or flashed to a device. A link in
+development version; it has not been released. The Flock repair build was flashed
+to an ESP32-DIV and its passive reception was checked; see [hardware checks](FLOCK.md#validation-limits). A link in
 this table means a reviewed reference, not that its entire repository was
 imported. Existing similarly named features are distinguished from this change.
 
