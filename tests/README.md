@@ -21,6 +21,9 @@ temporary directories and are removed when the scripts finish.
 - Detection audio: executes the production task against a simulated clock/PWM;
   checks finite tones, mute, exit cancellation, background silence and backlight
   isolation. Policy checks cover bursts, duplicates, capacity and time rollover.
+- Boot animation: guarded bitmap writes, exact doubled display pixels, complete
+  SPI transactions, finite frame timing including overruns/timer rollover,
+  unsupported display fallback and skull-to-logo ordering (hardware and VM).
 - Menu/settings: production text fitting, overflow paging, held-touch protection,
   opening-press handling, brightness bounds and persistence failure paths.
 - Receiver alerts: production receive handlers, partial radio startup failures,
@@ -37,4 +40,4 @@ Build the firmware separately with `./build-div-mac.sh` and the dependencies in
 navigation and text, confirm receiver start/stop repeatedly, compare RF occupancy
 against a known signal, receive known Find My/Remote ID test broadcasts and test
 USB installation/power behavior. The browser manifest intentionally continues to
-serve stable v1.7.29 while the source is v1.7.32-splash.
+serve stable v1.7.29 while the source is v1.7.33-skull.

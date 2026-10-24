@@ -5510,7 +5510,7 @@ void setup() {
 #if DIV_VM_BUILD
   displayLogo(UI.text, 150);
 #else
-  Serial.println("[boot] splash start; hold=2000ms");
+  Serial.println("[boot] splash start; skull=1440ms; shark=2000ms");
   const uint32_t splashStarted = millis();
   displayLogo(UI.text, 2000);
   Serial.printf("[boot] splash done; elapsed=%lums\n", (unsigned long)(millis() - splashStarted));

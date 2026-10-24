@@ -1,6 +1,7 @@
-// SHARKDIV display chrome: flat instrument cells and a static logo splash.
+// SHARKDIV display chrome and the two-stage skull / shark boot sequence.
 #include "SharkUI.h"
 #include "SharkLogo.h"
+#include "BootAnimation.h"
 #include "config.h"
 #include "SettingsStore.h"
 
@@ -42,10 +43,13 @@ void drawBrandGrid(int16_t y0, int16_t y1) {
 }
 
 void playSharkBoot(uint32_t holdMs) {
+#if !DIV_VM_BUILD
+  BootAnimation::play();
+#endif
   applyThemeToPalette(settings().theme);
   tft.fillScreen(UI.bg);
 
-  // Static logo, product name and version: readable without animated effects.
+  // After the skull breaks up, hold the user's logo, name and version still.
   const int16_t centerX = tft.width() / 2;
   const int16_t top = (tft.height() - 220) / 2;
   tft.drawBitmap(centerX - SHARK_LOGO_W / 2, top, shark_logo_bitmap,
