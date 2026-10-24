@@ -5491,24 +5491,7 @@ void setup() {
 #endif
   setBrightness(80);
 
-  applyThemeToPalette(settings().theme);
-
   tft.fillScreen(TFT_BLACK);
-
-#if DIV_VM_BUILD
-  loading(15, UI_ICON, 0, 0, 2, true);   // shortened boot animation under QEMU
-#else
-  // The old vendor logo screen is gone — the boot reel in
-  // displayLogo() is the one and only boot animation.
-  tft.fillScreen(TFT_BLACK);
-#endif
-
-  tft.fillScreen(TFT_BLACK);
-#if DIV_VM_BUILD
-  displayLogo(UI.text, 150);              // shortened logo hold under QEMU
-#else
-  displayLogo(UI.text, 500);
-#endif
 
   initSDCard();
 
@@ -5521,6 +5504,17 @@ void setup() {
   Serial.println("[boot] settings defaults (v1, SD deferred)");
 #endif
   applyThemeToPalette(settings().theme);
+  // Settings may deliberately be dim. Keep the boot logo visible, then restore
+  // the saved brightness before the menu. No display tasks run during the hold.
+  setBrightness(settings().brightness < 128 ? 128 : settings().brightness);
+#if DIV_VM_BUILD
+  displayLogo(UI.text, 150);
+#else
+  Serial.println("[boot] splash start; hold=2000ms");
+  const uint32_t splashStarted = millis();
+  displayLogo(UI.text, 2000);
+  Serial.printf("[boot] splash done; elapsed=%lums\n", (unsigned long)(millis() - splashStarted));
+#endif
   setBrightness(settings().brightness);
 
 #if HAS_PCF8574_BUTTONS
