@@ -11,17 +11,24 @@ struct Hit {
   int8_t rssi;
   bool bySsid;
   bool byOui;
-  bool byProbe;       // empty-SSID probe from a matching MAC
+  bool byProbe;       // valid wildcard probe from a matching MAC
+  bool byFingerprint; // ordered IE fingerprint, stronger candidate evidence
   uint32_t lastMs;
 };
 
 void begin();
 void addOui(const char* oui);   // extend OUI list (e.g. from SD)
 // One async scan pass; call poll() until it returns true.
-void startScan();
+bool startScan();
+void stop();                 // cancel owned scans and detach the probe receiver
+bool scanning();
+int lastError();
+int apsSeen();
+uint32_t probeFramesSeen();
+uint8_t channel();
 bool pollScan(int* matchedCount);
 // Promiscuous window for empty-SSID probes from matching OUIs.
-void startProbeWindow();
+bool startProbeWindow(bool hop = true);
 void stopProbeWindow();
 void pollProbes();
 
@@ -31,6 +38,6 @@ constexpr int kMaxHits = 12;
 int snapshot(Hit* out, int max);
 int hitCount();
 int bestRssi();               // strongest matched RSSI (for the meter)
-bool anyConfirmed();          // SSID or OUI+probe match
+bool anyConfirmed();          // legacy name: fingerprint match, not identity proof
 
 }  // namespace flock_wifi

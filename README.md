@@ -37,7 +37,7 @@ backlight power fix. ESP Web Tools 10.1.1 provides an alternate installer and
 serial console.
 
 The flasher and `docs/manifest.json` still serve the existing **v1.7.29** stable
-binary. This source branch is **v1.7.30-dev**; build it locally until a tested
+binary. This source branch is **v1.7.30-flock**; build it locally until a tested
 release is published.
 
 ## Building

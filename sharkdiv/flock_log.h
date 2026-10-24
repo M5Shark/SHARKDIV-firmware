@@ -18,11 +18,11 @@ struct Record {
 
 void begin();                       // mount SD, open session files
 bool ok();
-void add(const Record& r);          // append everywhere + history
+void add(const Record& r, bool persist = true); // RAM history even without SD
 int  historyCount();
 const Record* history(int i);
-bool canAlert(const char* mac);     // 30 s suppression per MAC
-void exportDeFlock();               // /flock/deflock.csv (re)written
+bool canAlert(const char* mac, uint32_t observedMs); // fresh reception, 30 s suppression
+bool exportDeFlock();               // valid GPS rows only; false reports failure
 const char* lastError();
 
 }  // namespace flock_log

@@ -2,6 +2,7 @@
 // flock_gps.h — geotagging for detections + follow-alert tracking.
 namespace flock_gps {
 void begin();
+void end();                       // release UART and invalidate the old fix
 void poll();                       // feed NMEA, keep last fix fresh
 bool fixValid();
 float lat();

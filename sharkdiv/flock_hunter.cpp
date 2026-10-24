@@ -1,220 +1,215 @@
-// flock_hunter.cpp — passive Flock Safety camera detector for ESP32-DIV.
-//
-// PASSIVE ONLY. Puts the radio in WiFi promiscuous (monitor) mode, hops the
-// 2.4GHz channels Flock cameras probe on, and lists any frame that matches the
-// Flock probe-request signature (see flock_hunter.h). It never transmits,
-// authenticates, or starts an AP — it only listens and draws.
-//
-// Ported from colonelpanichacks/flock-you (MIT) + the DeFlock research it cites.
-//
-// Self-contained: depends only on the global `tft`, <WiFi.h>/<esp_wifi.h>, and
-// flock_hunter.h. The sketch drives it exactly like every other WiFi feature:
-//   flockSetup()  on entry, flockLoop() in the while-loop, flockStop() on exit.
-
+// Passive Flock candidate receiver. Published evidence is not camera identity.
 #include "flock_hunter.h"
+#include "config.h"
+#include "Touchscreen.h"
+#include "utils.h"
 #include <WiFi.h>
-#include <TFT_eSPI.h>
 #include "esp_wifi.h"
 
-extern TFT_eSPI tft;
-
 namespace FlockHunter {
-
-// ── on-screen palette (green-on-black, matches the hacker theme) ──
-static const uint16_t COL_BG   = 0x0000;  // black
-static const uint16_t COL_GRN  = 0x07E0;  // bright green
-static const uint16_t COL_DIM  = 0x03E0;  // dim green
-static const uint16_t COL_HOT  = 0xFFE0;  // yellow highlight for a fresh hit
-
-// ── shared detection state (written in the RX callback, read in the loop) ──
-static portMUX_TYPE   s_mux = portMUX_INITIALIZER_UNLOCKED;
-static Detection      s_det[kMaxDetections];
-static volatile uint8_t  s_detCount   = 0;
-static volatile uint32_t s_frameCount = 0;   // total Flock frames seen
-static volatile bool     s_dirty      = true; // list needs a redraw
-
-// ── channel hopping ──
-static uint8_t  s_chanIdx    = 0;
-static uint32_t s_lastHop    = 0;
+static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+static Detection s_det[kMaxDetections];
+static uint8_t s_detCount = 0;
+static uint32_t s_probeCount = 0;
+static uint32_t s_matchCount = 0;
+static bool s_accept = false;
+static bool s_ready = false;
+static bool s_dirty = true;
+static uint8_t s_chanIdx = 0;
+static uint32_t s_lastHop = 0;
 static uint32_t s_lastRedraw = 0;
+static int s_error = 0;
 
-// Insert or refresh a detection. Runs in the WiFi task (callback) context.
-static void recordHit(const uint8_t* mac, int8_t rssi, uint8_t channel) {
+static int contentBottom() { return featureHasTouchNavBar() ? touchNavContentBottomY() : tft.height(); }
+
+static void recordHit(const uint8_t* mac, int8_t rssi, uint8_t channel,
+                      const FlockSignatures::ProbeEvidence& evidence) {
   portENTER_CRITICAL(&s_mux);
-  s_frameCount++;
+  if (!s_accept) { portEXIT_CRITICAL(&s_mux); return; }
+  const uint32_t now = millis();
+  if (s_matchCount != UINT32_MAX) ++s_matchCount;
   int slot = -1;
-  for (uint8_t i = 0; i < s_detCount; i++) {
+  for (uint8_t i = 0; i < s_detCount; ++i)
     if (memcmp(s_det[i].mac, mac, 6) == 0) { slot = i; break; }
-  }
-  uint32_t now = millis();
   if (slot < 0) {
-    if (s_detCount < kMaxDetections) {
-      slot = s_detCount++;
-      memcpy(s_det[slot].mac, mac, 6);
-      s_det[slot].count     = 0;
-      s_det[slot].firstSeen = now;
-      s_dirty = true;
+    if (s_detCount < kMaxDetections) slot = s_detCount++;
+    else {
+      slot = 0;
+      for (uint8_t i = 1; i < s_detCount; ++i)
+        if (uint32_t(now - s_det[i].lastSeen) > uint32_t(now - s_det[slot].lastSeen)) slot = i;
     }
+    s_det[slot] = {};
+    memcpy(s_det[slot].mac, mac, 6);
+    s_det[slot].firstSeen = now;
   }
-  if (slot >= 0) {
-    Detection& d = s_det[slot];
-    d.rssi    = rssi;
-    d.channel = channel;
-    d.lastSeen = now;
-    if (d.count < 0xFFFF) d.count++;
-    s_dirty = true;
-  }
+  Detection& hit = s_det[slot];
+  hit.rssi = rssi;
+  hit.channel = channel;
+  hit.lastSeen = now;
+  hit.byOui |= evidence.oui;
+  hit.fingerprint |= evidence.fingerprint;
+  if (hit.count != UINT16_MAX) ++hit.count;
+  s_dirty = true;
   portEXIT_CRITICAL(&s_mux);
 }
 
-// Promiscuous RX callback: gate every management frame through isFlockProbe().
 static void promiscCb(void* buf, wifi_promiscuous_pkt_type_t type) {
-  if (type != WIFI_PKT_MGMT) return;
-  const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
-  int len = pkt->rx_ctrl.sig_len;
-  if (len <= (int)sizeof(MacHdr)) return;
-  int8_t rssi = pkt->rx_ctrl.rssi;
-  if (rssi < kRssiMin) return;
-
-  const MacHdr* hdr = (const MacHdr*)pkt->payload;
-  const uint8_t* body = pkt->payload + sizeof(MacHdr);
-  int bodyLen = len - sizeof(MacHdr);
-
-  if (isFlockProbe(hdr, body, bodyLen)) {
-    recordHit(hdr->addr2, rssi, pkt->rx_ctrl.channel);
-  }
+  if (!buf || type != WIFI_PKT_MGMT) return;
+  const auto* pkt = static_cast<const wifi_promiscuous_pkt_t*>(buf);
+  const auto evidence = FlockSignatures::probeFrame(pkt->payload, pkt->rx_ctrl.sig_len, true);
+  if (!evidence.valid) return;
+  portENTER_CRITICAL(&s_mux);
+  const bool accept = s_accept;
+  if (accept && s_probeCount != UINT32_MAX) ++s_probeCount;
+  portEXIT_CRITICAL(&s_mux);
+  if (!accept || pkt->rx_ctrl.rssi < kRssiMin || !evidence.wildcard ||
+      (!evidence.oui && !evidence.fingerprint)) return;
+  recordHit(pkt->payload + 10, pkt->rx_ctrl.rssi, pkt->rx_ctrl.channel, evidence);
 }
 
-// ── drawing ──
 static void drawFrame() {
-  tft.fillScreen(COL_BG);
-  tft.drawRect(2, 2, tft.width() - 4, tft.height() - 4, COL_DIM);
+  featureClearContent(FEATURE_BG);
+  drawStatusBar(readBatteryVoltage(), true);
   tft.setTextFont(1);
-  tft.setTextColor(COL_GRN, COL_BG);
-  tft.setTextSize(2);
-  tft.setCursor(10, 10);
-  tft.print(">FLOCK HUNTER");
   tft.setTextSize(1);
-  tft.setTextColor(COL_DIM, COL_BG);
-  tft.setCursor(10, 32);
-  tft.print("passive scan  ch 1/6/11  SELECT=exit");
-  tft.drawFastHLine(8, 46, tft.width() - 16, COL_DIM);
+  tft.setTextColor(UI_TEXT, FEATURE_BG);
+  tft.setCursor(10, 25);
+  tft.print("FLOCK / PROBE MONITOR");
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(10, 40);
+  tft.print("Passive | channels 1-11 | 2 min");
+  tft.drawFastHLine(8, 53, tft.width() - 16, UI_LINE);
+  redrawTouchButtonBar();
 }
 
-static void drawStatus() {
-  // One status line: current channel + unique hits + frames seen.
-  char line[48];
-  snprintf(line, sizeof(line), "ch %-2u  hits:%-2u  frames:%lu   ",
-           (unsigned)kChannels[s_chanIdx], (unsigned)s_detCount,
-           (unsigned long)s_frameCount);
+static void drawStatus(uint8_t count, uint32_t probes, uint32_t matches) {
+  tft.fillRect(8, 58, tft.width() - 16, 33, FEATURE_BG);
   tft.setTextSize(1);
-  tft.setTextColor(COL_GRN, COL_BG);
-  tft.setCursor(10, 52);
-  tft.print(line);
+  tft.setTextColor(s_error ? UI_WARN : UI_TEXT, FEATURE_BG);
+  tft.setCursor(10, 58);
+  if (s_error) tft.printf("Radio error: %d", s_error);
+  else tft.printf("Ch %u | %u candidate addresses", kChannels[s_chanIdx], count);
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(10, 70);
+  tft.printf("Probes %lu | matched %lu", (unsigned long)probes, (unsigned long)matches);
+  tft.setCursor(10, 82);
+  tft.print("Signatures do not confirm a camera");
 }
 
 static void drawList() {
-  // Snapshot the table under the lock, then render without holding it.
-  Detection snap[kMaxDetections];
-  uint8_t n;
+  Detection snapshot[kMaxDetections];
   portENTER_CRITICAL(&s_mux);
-  n = s_detCount;
-  memcpy(snap, s_det, sizeof(Detection) * (n < kMaxDetections ? n : kMaxDetections));
+  const uint32_t now = millis();
+  uint8_t count = 0;
+  for (uint8_t i = 0; i < s_detCount; ++i)
+    if (uint32_t(now - s_det[i].lastSeen) < kHitTtlMs) s_det[count++] = s_det[i];
+  s_detCount = count;
+  memcpy(snapshot, s_det, sizeof(Detection) * count);
+  const uint32_t probes = s_probeCount;
+  const uint32_t matches = s_matchCount;
   s_dirty = false;
   portEXIT_CRITICAL(&s_mux);
-
-  const int top = 66;
-  const int rowH = 24;
-  const int maxRows = (tft.height() - top - 8) / rowH;  // ~10 rows on 240x320
-
-  tft.fillRect(6, top, tft.width() - 12, tft.height() - top - 6, COL_BG);
+  for (uint8_t i = 1; i < count; ++i) {
+    const Detection hit = snapshot[i];
+    int j = i;
+    while (j > 0 && snapshot[j - 1].rssi < hit.rssi) { snapshot[j] = snapshot[j - 1]; --j; }
+    snapshot[j] = hit;
+  }
+  drawStatus(count, probes, matches);
+  const int top = 99;
+  const int rowHeight = 27;
+  const int maxRows = (contentBottom() - top - 15) / rowHeight;
+  tft.fillRect(8, top, tft.width() - 16, contentBottom() - top, FEATURE_BG);
   tft.setTextSize(1);
-
-  if (n == 0) {
-    tft.setTextColor(COL_DIM, COL_BG);
-    tft.setCursor(12, top + 8);
-    tft.print("listening... no flock cameras yet");
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+  if (!count) {
+    tft.setCursor(10, top + 8);
+    tft.print(probes ? "Receiving probes; no matches yet" : "Waiting for nearby probe traffic");
     return;
   }
-
-  uint32_t now = millis();
-  int shown = (n < maxRows) ? n : maxRows;
-  for (int i = 0; i < shown; i++) {
-    const Detection& d = snap[i];
-    bool fresh = (now - d.lastSeen) < 1500;   // seen in the last 1.5s
-    int y = top + i * rowH;
-    tft.setTextColor(fresh ? COL_HOT : COL_GRN, COL_BG);
-    char mac[20];
-    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-             d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
-    tft.setCursor(12, y);
-    tft.print(mac);
-    char meta[28];
-    snprintf(meta, sizeof(meta), "rssi %d  ch%u  x%u",
-             (int)d.rssi, (unsigned)d.channel, (unsigned)d.count);
-    tft.setTextColor(COL_DIM, COL_BG);
-    tft.setCursor(16, y + 11);
-    tft.print(meta);
+  const int shown = count < maxRows ? count : maxRows;
+  for (int i = 0; i < shown; ++i) {
+    const Detection& hit = snapshot[i];
+    tft.setCursor(10, top + i * rowHeight);
+    tft.setTextColor(hit.fingerprint ? UI_WARN : UI_TEXT, FEATURE_BG);
+    tft.printf("%02X:%02X:%02X:%02X:%02X:%02X", hit.mac[0], hit.mac[1], hit.mac[2],
+               hit.mac[3], hit.mac[4], hit.mac[5]);
+    tft.setCursor(10, top + i * rowHeight + 12);
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+    tft.printf("%s %ddBm ch%u %lus", hit.fingerprint ? "IE" : "OUI", hit.rssi,
+               hit.channel, (unsigned long)((now - hit.lastSeen) / 1000));
   }
-  if (n > shown) {
-    tft.setTextColor(COL_DIM, COL_BG);
-    tft.setCursor(12, top + shown * rowH);
-    tft.print("...more (table full)");
+  if (count > shown) {
+    tft.setCursor(10, contentBottom() - 12);
+    tft.printf("Showing %d strongest of %u", shown, count);
   }
 }
 
-// ── entry points ──
 void flockSetup() {
+  pauseBackgroundRadioTasks();
+  setTouchButtonInputEnabled(true);
+  setTouchNavLabels(nullptr, nullptr, "Exit", nullptr, nullptr);
+  flockStop();
   portENTER_CRITICAL(&s_mux);
-  s_detCount   = 0;
-  s_frameCount = 0;
-  s_dirty      = true;
+  s_detCount = 0;
+  s_probeCount = 0;
+  s_matchCount = 0;
+  s_dirty = true;
   portEXIT_CRITICAL(&s_mux);
-  s_chanIdx    = 0;
-  s_lastHop    = millis();
+  s_chanIdx = 0;
+  s_lastHop = millis();
   s_lastRedraw = 0;
-
-  // Bring the radio up in a clean monitor state.
-  WiFi.mode(WIFI_MODE_STA);
-  WiFi.disconnect(true, true);
-  esp_wifi_set_promiscuous(false);
-
+  s_error = 0;
+  WiFi.setAutoReconnect(false);
+  if (!WiFi.mode(WIFI_MODE_STA)) s_error = ESP_FAIL;
+  // wifiOff=true disabled the very receiver we were about to use.
+  WiFi.disconnect(false, false);
   wifi_promiscuous_filter_t filter = {};
-  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;  // management frames only
-  esp_wifi_set_promiscuous_filter(&filter);
-  esp_wifi_set_promiscuous_rx_cb(&promiscCb);
-  esp_wifi_set_promiscuous(true);
-  esp_wifi_set_channel(kChannels[0], WIFI_SECOND_CHAN_NONE);
-
+  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
+  if (!s_error) s_error = esp_wifi_set_promiscuous(false);
+  if (!s_error) s_error = esp_wifi_set_promiscuous_filter(&filter);
+  if (!s_error) s_error = esp_wifi_set_channel(kChannels[0], WIFI_SECOND_CHAN_NONE);
+  if (!s_error) s_error = esp_wifi_set_promiscuous_rx_cb(&promiscCb);
+  portENTER_CRITICAL(&s_mux);
+  s_accept = s_error == 0;
+  portEXIT_CRITICAL(&s_mux);
+  if (!s_error) s_error = esp_wifi_set_promiscuous(true);
+  s_ready = s_error == 0;
+  if (!s_ready) {
+    portENTER_CRITICAL(&s_mux);
+    s_accept = false;
+    portEXIT_CRITICAL(&s_mux);
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(nullptr);
+  }
   drawFrame();
-  drawStatus();
   drawList();
 }
 
 void flockLoop() {
-  uint32_t now = millis();
-
-  // Hop channels on a timer so we cover 1 / 6 / 11.
-  if (now - s_lastHop >= kChannelDwellMs) {
+  if (feature_exit_requested) return;
+  const uint32_t now = millis();
+  if (s_ready && uint32_t(now - s_lastHop) >= kChannelDwellMs) {
+    const uint8_t next = (s_chanIdx + 1) % sizeof(kChannels);
+    const esp_err_t error = esp_wifi_set_channel(kChannels[next], WIFI_SECOND_CHAN_NONE);
+    if (error == ESP_OK) s_chanIdx = next;
+    else s_error = error;
     s_lastHop = now;
-    s_chanIdx = (s_chanIdx + 1) % (sizeof(kChannels) / sizeof(kChannels[0]));
-    esp_wifi_set_channel(kChannels[s_chanIdx], WIFI_SECOND_CHAN_NONE);
-    drawStatus();
   }
-
-  // Redraw the list when it changed, but no more than ~4x/sec to limit flicker.
-  if (s_dirty && (now - s_lastRedraw) >= 250) {
-    s_lastRedraw = now;
-    drawStatus();
-    drawList();
-  }
-
+  if (uint32_t(now - s_lastRedraw) >= 250) { s_lastRedraw = now; drawList(); }
+  updateStatusBar();
+  maintainTouchNavBar();
   delay(5);
 }
 
 void flockStop() {
-  esp_wifi_set_promiscuous_rx_cb(NULL);
-  esp_wifi_set_promiscuous(false);
+  portENTER_CRITICAL(&s_mux);
+  s_accept = false;
+  portEXIT_CRITICAL(&s_mux);
+  if (s_ready) {
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(nullptr);
+  }
+  s_ready = false;
 }
-
 }  // namespace FlockHunter

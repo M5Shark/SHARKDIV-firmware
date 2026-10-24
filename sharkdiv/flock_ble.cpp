@@ -1,117 +1,163 @@
-// flock_ble.cpp — passive (non-connecting, non-active-scan) BLE observer.
-// Matched devices are kept in a small table across scan windows and expire
-// after flk::kHitTtlMs, so the UI shows what is around now.
+// Passive BLE evidence receiver; no connections, GATT reads, or scan requests.
 #include "flock_ble.h"
 #include "flock_config.h"
 #include "config.h"
-#include <NimBLEDevice.h>
+#include "FlockSignatures.h"
+#include "BleHostOperation.h"
 #include <cstring>
 
 namespace flock_ble {
-
 static Hit s_hits[kMaxHits];
 static int s_count = 0;
 static bool s_running = false;
-// Written from the BLE host task, read from the UI loop.
+static bool s_ownsScan = false;
+static bool s_accept = false;
+static uint32_t s_advertisements = 0;
+static int s_error = 0;
+static BLEScan* s_scan = nullptr;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static void upsert(const std::string& name, const std::string& mac, int rssi) {
-  const uint32_t now = millis();
+static void upsert(const std::string& name, const std::string& mac, int rssi, uint8_t evidence) {
+  if (rssi < flk::kRssiPossible) return;
   portENTER_CRITICAL(&s_lock);
+  if (!s_accept) { portEXIT_CRITICAL(&s_lock); return; }
+  const uint32_t now = millis();
   int slot = -1;
-  for (int i = 0; i < s_count; i++) {
+  for (int i = 0; i < s_count; ++i)
     if (!strcmp(s_hits[i].mac, mac.c_str())) { slot = i; break; }
-  }
   if (slot < 0) {
-    if (s_count < kMaxHits) {
-      slot = s_count++;
-    } else {                     // table full: reuse the stalest entry
+    if (s_count < kMaxHits) slot = s_count++;
+    else {
       slot = 0;
-      for (int i = 1; i < kMaxHits; i++)
-        if (s_hits[i].lastMs < s_hits[slot].lastMs) slot = i;
+      for (int i = 1; i < kMaxHits; ++i)
+        if (uint32_t(now - s_hits[i].lastMs) > uint32_t(now - s_hits[slot].lastMs)) slot = i;
     }
-    strncpy(s_hits[slot].mac, mac.c_str(), 17); s_hits[slot].mac[17] = 0;
+    s_hits[slot] = {};
+    strncpy(s_hits[slot].mac, mac.c_str(), sizeof(s_hits[slot].mac) - 1);
   }
-  strncpy(s_hits[slot].name, name.c_str(), 23); s_hits[slot].name[23] = 0;
-  s_hits[slot].rssi = (int8_t)rssi;
-  s_hits[slot].lastMs = now;
+  Hit& hit = s_hits[slot];
+  if (!name.empty()) {
+    strncpy(hit.name, name.c_str(), sizeof(hit.name) - 1);
+    hit.name[sizeof(hit.name) - 1] = 0;
+  } else if (!hit.name[0]) {
+    const char* fallback = evidence & FlockSignatures::ByService ? "Service match" : "Vendor 09C8";
+    strncpy(hit.name, fallback, sizeof(hit.name) - 1);
+  }
+  hit.rssi = (int8_t)rssi;
+  hit.evidence |= evidence;
+  hit.lastMs = now;
   portEXIT_CRITICAL(&s_lock);
 }
 
 class Cb : public BLEAdvertisedDeviceCallbacks {
-  void onResult(BLEAdvertisedDevice* d) override {
-    if (!d || !d->haveName()) return;
-    const std::string n = d->getName();
-    if (n.empty()) return;
-    for (int i = 0; i < flk::kBleNameCount; i++) {
-      if (n.find(flk::kBleNames[i]) != std::string::npos) {
-        upsert(n, d->getAddress().toString(), d->getRSSI());
-        return;
-      }
-    }
+  void onResult(BLEAdvertisedDevice* device) override {
+    if (!device) return;
+    portENTER_CRITICAL(&s_lock);
+    const bool accept = s_accept;
+    if (accept && s_advertisements != UINT32_MAX) ++s_advertisements;
+    portEXIT_CRITICAL(&s_lock);
+    if (!accept) return;
+    const uint8_t evidence = FlockSignatures::bleAdvertisementEvidence(
+        device->getPayload(), device->getPayloadLength());
+    if (evidence) upsert(device->getName(), device->getAddress().toString(), device->getRSSI(), evidence);
   }
 };
 static Cb s_cb;
 
 void begin() {
+  stopWindow();
   portENTER_CRITICAL(&s_lock);
-  s_count = 0;
+  // Retain recent observations across launcher/view changes; snapshot expires them.
+  const uint32_t now = millis();
+  int kept = 0;
+  for (int i = 0; i < s_count; ++i)
+    if (uint32_t(now - s_hits[i].lastMs) < flk::kHitTtlMs) s_hits[kept++] = s_hits[i];
+  s_count = kept;
   portEXIT_CRITICAL(&s_lock);
+  s_error = 0;
 }
 
-void startWindow() {
-  ensureBleStackReady();
-  BLEScan* scan = BLEDevice::getScan();
-  scan->stop();
-  scan->setAdvertisedDeviceCallbacks(&s_cb, true);
-  scan->setActiveScan(false);        // PASSIVE: no scan requests sent
-  scan->setInterval(100);
-  scan->setWindow(100);
-  scan->setDuplicateFilter(true);
-  // duration-limited, non-blocking overload
-  scan->start(flk::kBleWindowMs / 1000, nullptr, false);
-  s_running = true;
+bool startWindow() {
+  if (running()) return true;
+  if (s_ownsScan) stopWindow();
+  s_error = 0;
+  if (!ensureBleStackReady()) { s_error = -2; return false; }
+  struct Result { BLEScan* scan; bool acquired; bool success; } result = {nullptr, false, false};
+  const bool executed = runBleHostOperation([](void* context) {
+    Result& result = *static_cast<Result*>(context);
+    BLEScan* scan = BLEDevice::getScan();
+    result.scan = scan;
+    if (!scan || !scan->stop()) return;
+    result.acquired = true;
+    scan->setAdvertisedDeviceCallbacks(nullptr);
+    scan->clearResults();
+    scan->setAdvertisedDeviceCallbacks(&s_cb, true);
+    scan->setActiveScan(false);
+    scan->setInterval(100);
+    scan->setWindow(100);
+    scan->setDuplicateFilter(false);
+    scan->setMaxResults(0);
+    portENTER_CRITICAL(&s_lock);
+    s_accept = true;
+    portEXIT_CRITICAL(&s_lock);
+    result.success = scan->start((flk::kBleWindowMs + 999) / 1000, nullptr, false);
+  }, &result);
+  s_scan = result.scan;
+  s_ownsScan = executed && result.acquired;
+  s_running = executed && result.success;
+  if (!s_running) { stopWindow(); s_error = -1; }
+  return s_running;
 }
 
 void stopWindow() {
-  BLEScan* scan = BLEDevice::getScan();
-  if (scan) scan->stop();
+  portENTER_CRITICAL(&s_lock);
+  s_accept = false;
+  portEXIT_CRITICAL(&s_lock);
   s_running = false;
+  if (!s_ownsScan || !s_scan) return;
+  bool stopped = false;
+  const bool executed = runBleHostOperation([](void* context) {
+    bool& stopped = *static_cast<bool*>(context);
+    if (!s_scan->stop()) return;
+    s_scan->setAdvertisedDeviceCallbacks(nullptr);
+    s_scan->clearResults();
+    s_scan->setMaxResults(0xFF);
+    stopped = true;
+  }, &stopped);
+  if (executed && stopped) { s_ownsScan = false; s_scan = nullptr; }
+  else s_error = -3;
 }
 
 int snapshot(Hit* out, int max) {
+  if (!out || max <= 0) return 0;
   Hit tmp[kMaxHits];
-  const uint32_t now = millis();
   portENTER_CRITICAL(&s_lock);
-  int w = 0;
-  for (int i = 0; i < s_count; i++) {
-    if (now - s_hits[i].lastMs <= flk::kHitTtlMs) s_hits[w++] = s_hits[i];
-  }
-  s_count = w;
-  memcpy(tmp, s_hits, sizeof(Hit) * w);
+  const uint32_t now = millis();
+  int count = 0;
+  for (int i = 0; i < s_count; ++i)
+    if (uint32_t(now - s_hits[i].lastMs) < flk::kHitTtlMs) s_hits[count++] = s_hits[i];
+  s_count = count;
+  memcpy(tmp, s_hits, sizeof(Hit) * count);
   portEXIT_CRITICAL(&s_lock);
-  for (int i = 1; i < w; i++) {       // strongest first
-    const Hit k = tmp[i];
-    int j = i - 1;
-    while (j >= 0 && tmp[j].rssi < k.rssi) { tmp[j + 1] = tmp[j]; j--; }
-    tmp[j + 1] = k;
+  for (int i = 1; i < count; ++i) {
+    const Hit hit = tmp[i];
+    int j = i;
+    while (j > 0 && tmp[j - 1].rssi < hit.rssi) { tmp[j] = tmp[j - 1]; --j; }
+    tmp[j] = hit;
   }
-  const int c = w < max ? w : max;
-  memcpy(out, tmp, sizeof(Hit) * c);
-  return c;
+  const int copied = count < max ? count : max;
+  memcpy(out, tmp, sizeof(Hit) * copied);
+  return copied;
 }
-
-int matches() {
-  Hit tmp[kMaxHits];
-  return snapshot(tmp, kMaxHits);
+int matches() { Hit hits[kMaxHits]; return snapshot(hits, kMaxHits); }
+int bestRssi() { Hit hits[kMaxHits]; return snapshot(hits, kMaxHits) ? hits[0].rssi : -128; }
+void poll() { if (s_running && s_scan && !s_scan->isScanning()) stopWindow(); }
+bool running() { return s_running && s_scan && s_scan->isScanning(); }
+int lastError() { return s_error; }
+uint32_t advertisementsSeen() {
+  portENTER_CRITICAL(&s_lock);
+  const uint32_t count = s_advertisements;
+  portEXIT_CRITICAL(&s_lock);
+  return count;
 }
-
-int bestRssi() {
-  Hit tmp[kMaxHits];
-  return snapshot(tmp, kMaxHits) > 0 ? tmp[0].rssi : -128;
-}
-
-void poll() {}
-bool running() { return s_running; }
-
 }  // namespace flock_ble
