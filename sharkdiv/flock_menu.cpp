@@ -1,4 +1,7 @@
-// Flock candidate receiver: bounded radio phases, explicit health and controls.
+// flock_menu.cpp — Flock Scanner app. Tabs: DETECT | SENSORS | SCORE | GPS |
+// LOG | SETT, plus a focused SIGNAL meter. SHARKDIV brand UI (green on black,
+// glass panels). Non-blocking: one phase of the scan cycle runs per pass.
+// Everything is receive-only; see flock_config.h for pins and weights.
 #include "flock_menu.h"
 #include "flock_config.h"
 #include "flock_wifi.h"
@@ -12,366 +15,621 @@
 #include "Touchscreen.h"
 #include <Preferences.h>
 #include <SD.h>
-#include <cmath>
+#include <FS.h>
 
 namespace flock_menu {
-enum Phase : uint8_t { P_WIFI, P_PROBE, P_BLE, P_SENSORS };
-enum Tab : uint8_t { T_DETECT, T_SENSORS, T_SCORE, T_GPS, T_LOG, T_SETT, T_COUNT, T_METER = 100 };
+
+enum Phase : uint8_t { P_WIFI, P_PROBE, P_BLE, P_SENSORS, P_COUNT };
+// Views: the six tabs plus a focused signal meter the launcher opens directly.
+enum Tab : uint8_t { T_DETECT, T_SENSORS, T_SCORE, T_GPS, T_LOG, T_SETT, T_COUNT,
+                     T_METER = 100 };
+
 static Phase s_phase = P_WIFI;
+static uint32_t s_phaseStart = 0;
 static Tab s_tab = T_DETECT;
-static uint8_t s_mode = 0; // 0 all, 1 Wi-Fi only, 2 BLE only
-static bool s_phaseEntered = false, s_phaseOk = false, s_started = false;
-static uint32_t s_phaseStart = 0, s_lastPaint = 0;
-static int s_cursor = 0, s_lastScore = 0, s_nrfAct = -1, s_lteStr = -1;
-static bool s_settings[5] = {true, true, true, true, true};
+static uint8_t s_mode = 0;             // 0 all / 1 wifi / 2 ble
+static int s_cursor = 0;               // list cursor / selected target
+static int s_lastScore = 0;
+static uint32_t s_lastPaint = 0;
+static uint32_t s_lastSensMs = 0;
+static int s_nrfAct = 0, s_lteStr = 0;
+static bool s_settings[6] = { true, true, true, true, true, false };
+// chHop, bleOn, gpsOn, sound, wardrive, irDisabledNote
 static Preferences s_prefs;
+
+// Local copies refreshed once per paint so a scan-task write can't change the
+// list mid-draw.
 static flock_wifi::Hit s_wifi[flock_wifi::kMaxHits];
+static int s_wifiN = 0;
 static flock_ble::Hit s_ble[flock_ble::kMaxHits];
-static int s_wifiN = 0, s_bleN = 0;
-static constexpr int kContentTop = 44, kListTop = 88;
+static int s_bleN = 0;
+
+static const int kContentTop = 44;     // below the status bar + tab strip
 static int contentBottom() { return touchNavContentBottomY(); }
-static const char* confidenceOf(const flock_wifi::Hit& h) {
-  if (h.byFingerprint) return "PROBE FINGERPRINT";
-  if (h.bySsid) return "SSID MATCH";
-  if (h.byProbe) return "OUI + PROBE";
-  return "VENDOR OUI";
-}
-static const char* bleEvidence(const flock_ble::Hit& h) {
-  if (h.evidence & 2) return "MANUFACTURER DATA";
-  if (h.evidence & 4) return "SERVICE UUID";
-  return "NAME MATCH";
-}
-static int totalHits() { return s_wifiN + s_bleN; }
-static void text(const String& value, int x, int y, uint16_t color = UI_TEXT, int font = 1, int width = 0) {
-  tft.setTextFont(font); tft.setTextSize(1); tft.setTextDatum(TL_DATUM);
+
+// ── brand drawing helpers ───────────────────────────────────────────────
+static void label(const char* s, int x, int baselineY, uint16_t color) {
+  tft.setFreeFont(&FreeSansBold9pt7b);
+  tft.setTextDatum(L_BASELINE);
   tft.setTextColor(color);
-  String shown = value;
-  const int available = width ? width : tft.width() - x - 8;
-  if (tft.textWidth(shown) > available) {
-    while (shown.length() && tft.textWidth(shown + "...") > available) shown.remove(shown.length() - 1);
-    shown += "...";
-  }
-  tft.drawString(shown, x, y);
+  tft.drawString(s, x, baselineY);
   tft.setTextFont(1);
+  tft.setTextDatum(TL_DATUM);
 }
-static void nav() {
-  const char* down = "Next"; const char* up = "Prev";
-  if (s_tab == T_SETT) up = "Toggle";
-  else if (s_tab == T_LOG) { down = "Export"; up = "Older"; }
-  else if (s_tab != T_DETECT && s_tab != T_METER) down = up = nullptr;
-  setTouchNavLabels("<Tab", down, "Exit", up, "Tab>");
+static void panel(int x, int y, int w, int h, bool sel) {
+  if (sel) {
+    tft.fillRoundRect(x, y, w, h, 8, UI_ICON);
+  } else {
+    tft.fillRoundRect(x, y, w, h, 8, UI_FG);
+    tft.drawRoundRect(x, y, w, h, 8, UI_LINE);
+  }
+}
+// A horizontal meter: track + green fill scaled from an RSSI in dBm.
+static void rssiBar(int x, int y, int w, int rssi, uint16_t fill) {
+  const int pct = constrain((rssi + 95) * 100 / 60, 0, 100);
+  tft.drawRoundRect(x, y, w, 8, 2, UI_LINE);
+  if (pct > 0) tft.fillRoundRect(x + 1, y + 1, (w - 2) * pct / 100, 6, 1, fill);
+}
+static uint16_t confColor(const char* c) {
+  if (!strcmp(c, "CONFIRMED")) return UI_ICON;
+  if (!strcmp(c, "LIKELY")) return UI_WARN;
+  return UI_DIM_TEXT;
+}
+
+static void chrome() {
+  setTouchButtonInputEnabled(true);
+  setTouchNavLabels("<Tab", nullptr, "Exit", nullptr, "Tab>");
+  featureClearContent(TFT_BLACK);
+  setStatusTitle("FLOCK");
+  drawStatusBar(readBatteryVoltage(), true);
+  setupTouchscreen();
   redrawTouchButtonBar();
 }
-static void panel(int x, int y, int w, int h, bool selected) {
-  tft.fillRect(x, y, w, h, selected ? UI_ICON : TFT_BLACK);
-  if (!selected) tft.drawFastHLine(x, y+h-1, w, UI_LINE);
-}
-static void meter(int x, int y, int w, int percent) {
-  tft.drawRect(x, y, w, 9, UI_LINE);
-  const int fill = (w - 2) * constrain(percent, 0, 100) / 100;
-  if (fill) tft.fillRect(x+1, y+1, fill, 7, UI_ICON);
-}
+
+// A compact tab strip just under the status bar; the active tab is a green pill.
 static void tabHeader() {
-  static const char* names[T_COUNT] = {"MATCH", "RF", "INFO", "GPS", "LOG", "SET"};
-  tft.fillRect(0, 20, tft.width(), 23, TFT_BLACK);
-  for (int i = 0; i < T_COUNT; ++i) {
-    const int x = 4 + i * 39;
-    if (i == int(s_tab)) tft.fillRect(x, 24, 36, 15, UI_ICON);
-    text(names[i], x+3, 28, i == int(s_tab) ? TFT_BLACK : UI_DIM_TEXT, 1, 33);
+  if (s_tab == T_METER) return;        // the meter is a focused view, no strip
+  static const char* const names[T_COUNT] =
+    { "DETECT", "2.4G", "SCORE", "GPS", "LOG", "SETT" };
+  tft.fillRect(0, 21, tft.width(), 22, TFT_BLACK);
+  int x = 4;
+  tft.setTextFont(1);
+  for (int i = 0; i < T_COUNT; i++) {
+    const int w = tft.textWidth(names[i], 1) + 10;
+    const bool on = (i == (int)s_tab);
+    if (on) tft.fillRoundRect(x, 24, w, 15, 4, UI_ICON);
+    else    tft.drawRoundRect(x, 24, w, 15, 4, UI_LINE);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(on ? TFT_BLACK : UI_DIM_TEXT, on ? UI_ICON : TFT_BLACK);
+    tft.drawString(names[i], x + w / 2, 32, 1);
+    x += w + 3;
+  }
+  tft.setTextDatum(TL_DATUM);
+}
+
+static const char* confidenceOf(const flock_wifi::Hit& h) {
+  if (h.bySsid) return "CONFIRMED";
+  if (h.byOui && h.byProbe) return "CONFIRMED";
+  if (h.byOui || h.byProbe) return "LIKELY";
+  return "POSSIBLE";
+}
+
+static void beep(int n) {
+  if (!s_settings[3]) return;
+  for (int i = 0; i < n; i++) {
+    ledcWriteTone(1, 2000);
+    delay(60);
+    ledcWriteTone(1, 0);
+    delay(60);
   }
 }
-static void refreshSnapshots() {
-  char selectedMac[18] = "";
-  const bool selecting = s_tab == T_DETECT || s_tab == T_METER;
-  const bool selectedWifi = s_cursor < s_wifiN;
-  if (selecting && s_cursor >= 0 && s_cursor < totalHits())
-    snprintf(selectedMac, sizeof(selectedMac), "%s", selectedWifi ? s_wifi[s_cursor].mac : s_ble[s_cursor-s_wifiN].mac);
-  s_wifiN = s_mode == 2 ? 0 : flock_wifi::snapshot(s_wifi, flock_wifi::kMaxHits);
-  s_bleN = s_mode == 1 || !s_settings[1] ? 0 : flock_ble::snapshot(s_ble, flock_ble::kMaxHits);
-  if (selectedMac[0]) {
-    if (selectedWifi) { for (int i = 0; i < s_wifiN; ++i) if (!strcmp(selectedMac, s_wifi[i].mac)) { s_cursor = i; break; } }
-    else { for (int i = 0; i < s_bleN; ++i) if (!strcmp(selectedMac, s_ble[i].mac)) { s_cursor = s_wifiN+i; break; } }
+
+static void maybeAlert(const flock_wifi::Hit& h, int score) {
+  const char* lab = flock_score::label(score);
+  if (!strcmp(lab, "QUIET") || !strcmp(lab, "POSSIBLE")) return;
+  if (!flock_log::canAlert(h.mac, h.lastMs)) return;
+
+  flock_log::Record r;
+  strncpy(r.mac, h.mac, 17); r.mac[17] = 0;
+  strncpy(r.ssid, h.ssid, 32); r.ssid[32] = 0;
+  r.rssi = h.rssi;
+  r.score = score;
+  r.confidence = confidenceOf(h);
+  r.lat = flock_gps::fixValid() ? flock_gps::lat() : NAN;
+  r.lon = flock_gps::fixValid() ? flock_gps::lon() : NAN;
+  flock_gps::utc(r.utc, sizeof(r.utc));
+  r.follow = flock_gps::followAlert(h.mac);
+  flock_log::add(r);
+  if (r.follow) {
+    showNotification("FOLLOW ALERT", "Same device at 3+ locations");
+  } else {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "%s %d dBm (score %d)", h.mac, h.rssi, score);
+    showNotification(lab, msg);
   }
-  s_lastScore = flock_score::compute(s_wifiN > 0, s_bleN > 0, 0, 0, false);
-  const int count = s_tab == T_SETT ? 5 : s_tab == T_LOG ? flock_log::historyCount() : totalHits();
-  if (count <= 0) s_cursor = 0;
-  else s_cursor = constrain(s_cursor, 0, count - 1);
+  beep(score >= 60 ? 3 : 2);
 }
-static void recordMatch(const char* mac, const char* name, int rssi, const char* evidence, int index, uint32_t observedMs) {
-  if (!flock_log::canAlert(mac, observedMs)) return;
-  flock_log::Record r = {};
-  snprintf(r.mac, sizeof(r.mac), "%s", mac); snprintf(r.ssid, sizeof(r.ssid), "%s", name);
-  r.rssi = rssi; r.score = index; r.confidence = evidence;
-  r.lat = flock_gps::lat(); r.lon = flock_gps::lon();
-  flock_gps::utc(r.utc, sizeof(r.utc)); r.follow = flock_gps::followAlert(mac);
-  flock_log::add(r, s_settings[4]);
-}
+
+// ── phase engine: one radio at a time, never blocking ──
 static void scoreAndAlert() {
-  refreshSnapshots();
-  for (int i = 0; i < s_wifiN; ++i) recordMatch(s_wifi[i].mac, s_wifi[i].ssid, s_wifi[i].rssi, confidenceOf(s_wifi[i]), flk::kScoreWifi, s_wifi[i].lastMs);
-  for (int i = 0; i < s_bleN; ++i) recordMatch(s_ble[i].mac, s_ble[i].name, s_ble[i].rssi, bleEvidence(s_ble[i]), flk::kScoreBle, s_ble[i].lastMs);
-  s_lastScore = flock_score::compute(s_wifiN > 0, s_bleN > 0, 0, 0, false);
-}
-static void selectPhase(Phase phase) { s_phase = phase; s_phaseEntered = false; }
-static void finishCycle() {
-  scoreAndAlert();
-  selectPhase(s_mode == 2 ? P_BLE : P_WIFI);
-}
-static void afterWifi() {
-  if (s_mode != 1 && s_settings[1]) selectPhase(P_BLE);
-  else if (s_mode == 0) selectPhase(P_SENSORS);
-  else finishCycle();
-}
-static void runPhase() {
-  // Start once on entry, regardless of how much setup/painting delayed this tick.
-  if (!s_phaseEntered) {
-    s_phaseEntered = true; s_phaseStart = millis(); s_phaseOk = true;
-    switch (s_phase) {
-      case P_WIFI: s_phaseOk = flock_wifi::startScan(); break;
-      case P_PROBE: s_phaseOk = flock_wifi::startProbeWindow(s_settings[0]); break;
-      case P_BLE: s_phaseOk = s_settings[1] && flock_ble::startWindow(); break;
-      case P_SENSORS:
-        s_nrfAct = flock_sensors::sampleNrf();
-        s_lteStr = flock_sensors::sampleLte();
-        break;
-    }
+  flock_wifi::Hit hits[flock_wifi::kMaxHits];
+  const int n = flock_wifi::snapshot(hits, flock_wifi::kMaxHits);
+  const bool ble = flock_ble::matches() > 0;
+  for (int i = 0; i < n; i++) {
+    const int score = flock_score::compute(
+        hits[i].bySsid || hits[i].byOui || hits[i].byProbe,
+        ble, s_lteStr, s_nrfAct, false);
+    maybeAlert(hits[i], score);
   }
-  const uint32_t elapsed = uint32_t(millis() - s_phaseStart);
+  s_lastScore = flock_score::compute(n > 0, ble, s_lteStr, s_nrfAct, false);
+}
+
+static void runPhase() {
+  const uint32_t now = millis();
   switch (s_phase) {
-    case P_WIFI: {
-      int matched = 0;
-      const bool complete = flock_wifi::pollScan(&matched);
-      if (!s_phaseOk || complete || elapsed >= flk::kWifiWindowMs + 4000) {
-        if (!complete && s_phaseOk) flock_wifi::stop();
-        selectPhase(P_PROBE);
+    case P_WIFI:
+      if (now - s_phaseStart < 100) {
+        flock_wifi::startScan();
+      } else {
+        int n;
+        if (flock_wifi::pollScan(&n) && now - s_phaseStart > flk::kWifiWindowMs) {
+          s_phase = (s_mode == 2) ? P_BLE : P_PROBE;   // BLE-only skips probes
+          if (s_phase == P_BLE) flock_ble::startWindow();
+          s_phaseStart = now;
+        }
       }
       break;
-    }
     case P_PROBE:
-      flock_wifi::pollProbes();
-      if (!s_phaseOk || elapsed >= flk::kProbeWindowMs) {
-        flock_wifi::stopProbeWindow(); afterWifi();
+      if (now - s_phaseStart < 100) flock_wifi::startProbeWindow();
+      else if (now - s_phaseStart > flk::kProbeWindowMs) {
+        flock_wifi::stopProbeWindow();
+        // BLE runs unless this is a Wi-Fi-only tool or BLE is turned off.
+        s_phase = (s_mode != 1 && s_settings[1]) ? P_BLE : P_SENSORS;
+        if (s_phase == P_BLE) flock_ble::startWindow();
+        s_phaseStart = now;
       }
       break;
     case P_BLE:
       flock_ble::poll();
-      if ((!s_phaseOk && elapsed >= 1000) || !s_settings[1] || elapsed >= flk::kBleWindowMs ||
-          (s_phaseOk && !flock_ble::running())) {
+      if (now - s_phaseStart > flk::kBleWindowMs) {
         flock_ble::stopWindow();
-        if (s_mode == 2) finishCycle(); else selectPhase(P_SENSORS);
+        s_phase = (s_mode == 2) ? P_WIFI : P_SENSORS;   // BLE-only loops back
+        s_phaseStart = now;
       }
       break;
-    case P_SENSORS: finishCycle(); break;
+    case P_SENSORS:
+      if (now - s_lastSensMs > flk::kSensorTickMs) {
+        s_lastSensMs = now;
+        s_nrfAct = flock_sensors::sampleNrf();
+        s_lteStr = flock_sensors::sampleLte();
+      }
+      if (now - s_phaseStart > 2000) {
+        scoreAndAlert();                 // runs in every mode now
+        s_phase = P_WIFI; s_phaseStart = now;
+      }
+      break;
+    default: s_phase = P_WIFI; s_phaseStart = now;
   }
 }
-static const char* phaseName() {
-  switch (s_phase) { case P_WIFI: return "AP SCAN"; case P_PROBE: return "PROBES"; case P_BLE: return "BLE RX"; default: return "RF SAMPLE"; }
-}
-static void health() {
-  char line[64];
-  if (s_mode == 2) snprintf(line, sizeof(line), "WiFi disabled in BLE-only mode");
-  else snprintf(line, sizeof(line), "APs %d  probes %lu  matches %d", flock_wifi::apsSeen(), (unsigned long)flock_wifi::probeFramesSeen(), s_wifiN);
-  text(line, 8, 47, UI_DIM_TEXT);
-  if (s_mode == 1 || !s_settings[1]) snprintf(line, sizeof(line), "BLE disabled%s", s_mode == 1 ? " in WiFi-only mode" : " in settings");
-  else snprintf(line, sizeof(line), "BLE reports %lu  matches %d", (unsigned long)flock_ble::advertisementsSeen(), s_bleN);
-  text(line, 8, 59, UI_DIM_TEXT);
-  const int wifiError = s_mode == 2 ? 0 : flock_wifi::lastError();
-  const int bleError = s_mode == 1 || !s_settings[1] ? 0 : flock_ble::lastError();
-  if (wifiError || bleError) snprintf(line, sizeof(line), "RX error WiFi:%d BLE:%d", wifiError, bleError);
-  else snprintf(line, sizeof(line), "%s  CH %02u | passive", phaseName(), flock_wifi::channel());
-  text(line, 8, 71, wifiError || bleError ? UI_WARN : UI_ICON);
-}
+
+// ── tab rendering ──
 static void drawDetect() {
-  health();
-  const int count = totalHits();
-  if (!count) {
-    text("No matching candidates yet", 8, 106, UI_TEXT, 2);
-    text("Seen counts include nonmatches.", 8, 133, UI_DIM_TEXT);
-    text("A quiet scan does not exclude cameras.", 8, 148, UI_DIM_TEXT);
+  const bool bleView = (s_mode == 2);
+  tft.fillRect(0, kContentTop, tft.width(), contentBottom() - kContentTop, TFT_BLACK);
+  const int n = bleView ? s_bleN : s_wifiN;
+  if (n == 0) {
+    tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(bleView ? "scanning BLE - nothing yet"
+                           : "scanning - no matches yet",
+                   tft.width() / 2, 130, 2);
+    tft.setTextDatum(TL_DATUM);
     return;
   }
-  const int rows = max(1, (contentBottom() - kListTop - 16) / 38);
-  const int first = (s_cursor / rows) * rows;
-  for (int i = first; i < count && i < first + rows; ++i) {
-    const int y = kListTop + (i-first)*38; const bool selected = i == s_cursor;
-    const bool wifi = i < s_wifiN; const int bi = i-s_wifiN;
-    const char* name = wifi ? s_wifi[i].ssid : s_ble[bi].name;
-    const char* mac = wifi ? s_wifi[i].mac : s_ble[bi].mac;
-    const int rssi = wifi ? s_wifi[i].rssi : s_ble[bi].rssi;
-    panel(6, y, tft.width()-12, 36, selected);
-    const uint16_t fg = selected ? TFT_BLACK : UI_TEXT;
-    text(name[0] ? name : (wifi ? "WiFi candidate" : "BLE candidate"), 12, y+3, fg, 1, 216);
-    text(mac, 12, y+14, fg, 1, 124);
-    text(String(rssi)+" dBm", 174, y+14, fg, 1, 56);
-    text(wifi ? confidenceOf(s_wifi[i]) : bleEvidence(s_ble[bi]), 12, y+25, selected ? TFT_BLACK : UI_DIM_TEXT);
+  const int rowH = 40, top = kContentTop + 2;
+  const int vis = (contentBottom() - top) / rowH;
+  for (int i = 0; i < n && i < vis; i++) {
+    const int y = top + i * rowH;
+    const bool sel = (i == s_cursor);
+    panel(6, y, tft.width() - 12, rowH - 4, sel);
+    const uint16_t fg = sel ? TFT_BLACK : UI_TEXT;
+    if (bleView) {
+      label(s_ble[i].name[0] ? s_ble[i].name : s_ble[i].mac, 14, y + 16, fg);
+      tft.setTextColor(sel ? TFT_BLACK : UI_DIM_TEXT);
+      tft.drawString(s_ble[i].mac, 14, y + 20, 1);
+      rssiBar(tft.width() - 96, y + 8, 80, s_ble[i].rssi, sel ? TFT_BLACK : UI_ICON);
+      tft.setTextDatum(TR_DATUM);
+      tft.setTextColor(sel ? TFT_BLACK : UI_DIM_TEXT);
+      tft.drawString(String(s_ble[i].rssi) + "dBm", tft.width() - 14, y + 22, 1);
+      tft.setTextDatum(TL_DATUM);
+    } else {
+      const char* conf = confidenceOf(s_wifi[i]);
+      label(s_wifi[i].ssid[0] ? s_wifi[i].ssid : s_wifi[i].mac, 14, y + 15, fg);
+      tft.setTextColor(sel ? TFT_BLACK : UI_DIM_TEXT);
+      tft.drawString(s_wifi[i].mac, 14, y + 20, 1);
+      tft.setTextDatum(TR_DATUM);
+      tft.setTextColor(sel ? TFT_BLACK : confColor(conf));
+      tft.drawString(conf, tft.width() - 14, y + 7, 1);
+      tft.setTextColor(sel ? TFT_BLACK : UI_DIM_TEXT);
+      tft.drawString(String(s_wifi[i].rssi) + " dBm", tft.width() - 14, y + 20, 1);
+      tft.setTextDatum(TL_DATUM);
+      rssiBar(14, y + 24, 120, s_wifi[i].rssi, sel ? TFT_BLACK : UI_ICON);
+    }
   }
-  text(String(s_cursor+1)+" / "+String(count)+"  unverified candidates", 8, contentBottom()-12, UI_DIM_TEXT);
 }
+
+// Big focused meter for the strongest target (Signal Meter launcher entry).
 static void drawMeter() {
-  health();
-  if (!totalHits()) { text("No matching signal yet", 8, 110, UI_TEXT, 2); return; }
-  const bool wifi = s_cursor < s_wifiN; const int bi = s_cursor-s_wifiN;
-  const char* name = wifi ? s_wifi[s_cursor].ssid : s_ble[bi].name;
-  const char* mac = wifi ? s_wifi[s_cursor].mac : s_ble[bi].mac;
-  const int rssi = wifi ? s_wifi[s_cursor].rssi : s_ble[bi].rssi;
-  text(name[0] ? name : mac, 8, 96, UI_TEXT, 2);
-  text(mac, 8, 122, UI_DIM_TEXT);
-  text(String(rssi)+" dBm", 8, 147, UI_ICON, 2);
-  meter(8, 174, tft.width()-16, (rssi+100)*100/65);
-  text("Signal strength is not distance.", 8, 199, UI_DIM_TEXT);
-  text("Prev / Next chooses a candidate.", 8, 214, UI_DIM_TEXT);
+  tft.fillRect(0, 21, tft.width(), contentBottom() - 21, TFT_BLACK);
+  tft.setTextFont(1);
+  const int n = s_wifiN;
+  const bool have = n > 0;
+  const flock_wifi::Hit* h = have ? &s_wifi[0] : nullptr;
+
+  panel(8, 26, tft.width() - 16, 30, false);
+  tft.setTextColor(UI_DIM_TEXT, UI_FG);
+  tft.drawString("TARGET", 16, 32, 1);
+  label(have ? (h->ssid[0] ? h->ssid : h->mac) : "no target yet", 16, 50,
+        have ? UI_ICON : UI_DIM_TEXT);
+
+  const int rssi = have ? h->rssi : -100;
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(&FreeSansBold9pt7b);
+  tft.setTextColor(UI_ICON, TFT_BLACK);
+  tft.drawString(have ? String(rssi) : "--", tft.width() / 2 - 16, 104);
+  tft.setTextFont(1);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("dBm", tft.width() / 2 + 34, 100);
+  tft.setTextDatum(TL_DATUM);
+
+  rssiBar(16, 120, tft.width() - 32, rssi, UI_ICON);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("-95", 16, 132, 1);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString("-35", tft.width() - 16, 132, 1);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(UI_TEXT, TFT_BLACK);
+  const char* hint = !have ? "move around to find a camera"
+                   : rssi > -50 ? "VERY CLOSE"
+                   : rssi > -70 ? "warmer - getting closer"
+                                : "weak - keep moving";
+  tft.drawString(hint, tft.width() / 2, 160, 2);
+  tft.setTextDatum(TL_DATUM);
+  if (have) {
+    tft.setTextColor(confColor(confidenceOf(*h)), TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(confidenceOf(*h), tft.width() / 2, 184, 2);
+    tft.setTextDatum(TL_DATUM);
+  }
 }
+
 static void drawSensors() {
-  text("RF ACTIVITY / optional modules", 8, 50, UI_ICON);
-  text(s_nrfAct < 0 ? "nRF24: unavailable / not sampled" : "nRF24: "+String(s_nrfAct)+"% sampled occupancy", 8, 77);
-  meter(8, 94, tft.width()-16, max(0, s_nrfAct));
-  text(s_lteStr < 0 ? "CC1101: unavailable / not sampled" : "SubGHz energy index: "+String(s_lteStr), 8, 124);
-  meter(8, 141, tft.width()-16, max(0, s_lteStr));
-  text("Spots: 850 / 868 / 895 MHz", 8, 159, UI_DIM_TEXT);
-  text("IR: raw photodiode not fitted", 8, 188, UI_DIM_TEXT);
-  text("RF energy cannot identify a camera.", 8, 212, UI_DIM_TEXT);
+  tft.fillRect(0, kContentTop, tft.width(), contentBottom() - kContentTop, TFT_BLACK);
+  const int w = tft.width() - 16;
+  // 2.4 GHz activity
+  panel(8, 48, w, 42, false);
+  tft.setTextColor(UI_ICON, UI_FG);
+  tft.drawString("2.4 GHz activity  (nRF24 RX)", 16, 54, 1);
+  tft.drawRoundRect(16, 70, w - 16, 10, 2, UI_LINE);
+  tft.fillRoundRect(17, 71, (w - 18) * s_nrfAct / 100, 8, 1, UI_ICON);
+  // LTE burst
+  panel(8, 96, w, 42, false);
+  const bool burst = flock_sensors::lteBurstSeen();
+  tft.setTextColor(UI_ICON, UI_FG);
+  tft.drawString("LTE-band burst  (CC1101 RSSI)", 16, 102, 1);
+  tft.drawRoundRect(16, 118, w - 16, 10, 2, UI_LINE);
+  tft.fillRoundRect(17, 119, (w - 18) * s_lteStr / 100, 8, 1, burst ? TFT_RED : UI_ICON);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(burst ? TFT_RED : UI_DIM_TEXT, UI_FG);
+  tft.drawString(burst ? "BURST" : "quiet", 8 + w - 6, 102, 1);
+  tft.setTextDatum(TL_DATUM);
+  // IR
+  panel(8, 144, w, 42, false);
+  tft.setTextColor(UI_ICON, UI_FG);
+  tft.drawString("IR illuminator", 16, 150, 1);
+  int adc;
+  if (flock_sensors::sampleIr(&adc)) {
+    tft.setTextColor(UI_TEXT, UI_FG);
+    tft.drawString("adc " + String(adc), 16, 166, 1);
+  } else {
+    tft.setTextColor(UI_DIM_TEXT, UI_FG);
+    tft.drawString("needs photodiode (TSOP only)", 16, 166, 1);
+  }
 }
+
 static void drawScore() {
-  text("SESSION EVIDENCE", 8, 50, UI_ICON);
-  text("WiFi candidates: "+String(s_wifiN), 8, 80, UI_TEXT, 2);
-  text("BLE candidates: "+String(s_bleN), 8, 106, UI_TEXT, 2);
-  text(flock_score::label(s_lastScore), 8, 144, UI_ICON);
-  text("Matches are clues, not confirmation.", 8, 172, UI_DIM_TEXT);
-  text("WiFi/BLE matches may be unrelated.", 8, 187, UI_DIM_TEXT);
-  text("Ambient RF adds no identity evidence.", 8, 202, UI_DIM_TEXT);
+  tft.fillRect(0, kContentTop, tft.width(), contentBottom() - kContentTop, TFT_BLACK);
+  const char* lab = flock_score::label(s_lastScore);
+  const uint16_t c = confColor(!strcmp(lab, "CONFIRMED") ? "CONFIRMED"
+                             : !strcmp(lab, "LIKELY") ? "LIKELY" : "x");
+  // ring-ish: a thick arc faked with a filled wedge is costly; use a big number
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(&FreeSansBold9pt7b);
+  tft.setTextColor(c, TFT_BLACK);
+  tft.drawString(String(s_lastScore), tft.width() / 2, 96);
+  tft.setTextFont(1);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("/ 100", tft.width() / 2, 120, 1);
+  tft.setTextColor(c, TFT_BLACK);
+  tft.drawString(lab, tft.width() / 2, 150, 2);
+  tft.setTextDatum(TL_DATUM);
+  // evidence meter
+  const int w = tft.width() - 32;
+  tft.drawRoundRect(16, 172, w, 10, 2, UI_LINE);
+  tft.fillRoundRect(17, 173, (w - 2) * constrain(s_lastScore, 0, 100) / 100, 8, 1, c);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  char line[72];
+  snprintf(line, sizeof(line), "wifi%d ble%d lte%d 2g%d ir%d",
+           flk::kScoreWifi, flk::kScoreBle, flk::kScoreLte,
+           flk::kScoreNrf, flk::kScoreIr);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(line, tft.width() / 2, 196, 1);
+  tft.setTextDatum(TL_DATUM);
 }
+
 static void drawGps() {
-  text("OBSERVER LOCATION", 8, 50, UI_ICON);
-  if (!flock_gps::fixValid()) {
-    text(s_settings[2] ? "No fresh GPS fix" : "GPS disabled", 8, 88, UI_WARN, 2);
-    text("Check GPS wiring and satellite view.", 8, 119, UI_DIM_TEXT); return;
+  tft.fillRect(0, kContentTop, tft.width(), contentBottom() - kContentTop, TFT_BLACK);
+  const int w = tft.width() - 16;
+  panel(8, 52, w, 150, false);
+  if (flock_gps::fixValid()) {
+    char l[48];
+    tft.setTextColor(UI_DIM_TEXT, UI_FG);
+    tft.drawString("FIX", 18, 60, 1);
+    snprintf(l, sizeof(l), "%.5f, %.5f",
+             (double)flock_gps::lat(), (double)flock_gps::lon());
+    label(l, 18, 82, UI_ICON);
+    char t[10]; flock_gps::utc(t, sizeof(t));
+    tft.setTextColor(UI_TEXT, UI_FG);
+    tft.drawString(String("UTC  ") + t, 18, 100, 2);
+    tft.setTextColor(UI_DIM_TEXT, UI_FG);
+    tft.drawString("geotagging every detection", 18, 130, 1);
+    tft.drawString("follow alert: 3+ fixes >500 m", 18, 146, 1);
+  } else {
+    tft.setTextColor(UI_WARN, UI_FG);
+    label("no GPS fix", 18, 90, UI_WARN);
+    tft.setTextColor(UI_DIM_TEXT, UI_FG);
+    tft.drawString(s_settings[2] ? "waiting for satellites..."
+                                 : "GPS is OFF in SETT", 18, 120, 1);
   }
-  char line[48];
-  snprintf(line, sizeof(line), "Latitude  %.6f", double(flock_gps::lat())); text(line, 8, 82);
-  snprintf(line, sizeof(line), "Longitude %.6f", double(flock_gps::lon())); text(line, 8, 103);
-  char time[10]; flock_gps::utc(time, sizeof(time)); text(String("UTC ")+time, 8, 130);
-  text("Logs store your receiver position,", 8, 169, UI_DIM_TEXT);
-  text("not the camera's coordinates.", 8, 184, UI_DIM_TEXT);
-  text("Fix expires after 5 seconds unseen.", 8, 210, UI_DIM_TEXT);
 }
+
 static void drawLog() {
-  const int count = flock_log::historyCount();
-  text("Recent session records: "+String(count)+" / 20", 8, 48, UI_ICON);
-  text(!flock_log::ok() ? flock_log::lastError() : s_settings[4] ? "SD autolog ON" : "SD autolog OFF; RAM history active", 8, 62, flock_log::ok() ? UI_DIM_TEXT : UI_WARN);
-  text("Export includes GPS-tagged rows only.", 8, 76, UI_DIM_TEXT);
-  const int rows = max(1, (contentBottom()-100) / 34);
-  for (int k = 0; k < rows && s_cursor+k < count; ++k) {
-    const auto* r = flock_log::history(count-1-s_cursor-k); const int y = 96+k*34;
-    panel(6, y, tft.width()-12, 32, false);
-    text(String(r->utc)+"  "+r->mac, 12, y+3);
-    text(String(r->confidence)+"  "+String(r->rssi)+" dBm", 12, y+16, UI_DIM_TEXT);
+  tft.fillRect(0, kContentTop, tft.width(), contentBottom() - kContentTop, TFT_BLACK);
+  if (!flock_log::ok()) {
+    tft.setTextColor(UI_WARN, TFT_BLACK);
+    tft.drawString(flock_log::lastError(), 8, 90, 2);
+    tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+    tft.drawString("insert an SD card to log + export", 8, 112, 1);
+    return;
+  }
+  const int n = flock_log::historyCount();
+  tft.setTextColor(UI_ICON, TFT_BLACK);
+  tft.drawString("session detections: " + String(n), 8, 48, 1);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("DOWN = export DeFlock csv to SD", 8, 62, 1);
+  // newest first
+  const int rows = 6, top = 78;
+  for (int k = 0; k < n && k < rows; k++) {
+    const int idx = n - 1 - k;
+    const flock_log::Record* r = flock_log::history(idx);
+    if (!r) continue;
+    const int y = top + k * 22;
+    panel(6, y, tft.width() - 12, 20, false);
+    tft.setTextColor(k == 0 ? UI_TEXT : UI_DIM_TEXT, UI_FG);
+    char l[48];
+    snprintf(l, sizeof(l), "%s  %s", r->utc, r->mac);
+    tft.drawString(l, 12, y + 6, 1);
+    tft.setTextDatum(TR_DATUM);
+    tft.setTextColor(confColor(r->confidence), UI_FG);
+    tft.drawString(String(r->rssi) + "dBm", tft.width() - 12, y + 6, 1);
+    tft.setTextDatum(TL_DATUM);
   }
 }
+
 static void drawSett() {
-  static const char* names[5] = {"Probe channel hop", "BLE reception", "GPS receiver", "Match sound", "SD autolog"};
-  for (int i = 0; i < 5; ++i) {
-    const int y = 48+i*32; const bool sel = s_cursor == i;
-    panel(6, y, tft.width()-12, 30, sel);
-    text(names[i], 12, y+7, sel ? TFT_BLACK : UI_TEXT, 1, 170);
-    text(s_settings[i] ? "ON" : "OFF", 201, y+7, sel ? TFT_BLACK : UI_ICON, 1, 29);
+  static const char* const names[5] = {
+    "channel-hop probes", "BLE scan", "GPS", "sound", "wardrive autolog" };
+  tft.fillRect(0, kContentTop, tft.width(), contentBottom() - kContentTop, TFT_BLACK);
+  for (int i = 0; i < 5; i++) {
+    const int y = 50 + i * 30;
+    const bool sel = (i == s_cursor);
+    panel(8, y, tft.width() - 16, 26, sel);
+    label(names[i], 16, y + 17, sel ? TFT_BLACK : UI_TEXT);
+    // Fixed-position toggle pill so ON/OFF never drifts from its label (#1.4)
+    const bool on = s_settings[i];
+    const int16_t px = tft.width() - 66;
+    const int16_t py = y + 5;
+    tft.fillRoundRect(px, py, 50, 16, 4, on ? 0x03E0 : UI_LINE);
+    tft.drawRoundRect(px, py, 50, 16, 4, on ? 0x07E0 : UI_LABLE);
+    tft.fillRect(px + (on ? 28 : 4), py + 2, 18, 12, on ? 0x07E0 : UI_LABLE);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(on ? 0x0010 : UI_DIM_TEXT, TFT_BLACK);
+    tft.drawString(on ? "ON" : "OFF", px + 14, py + 8, 1);
+    tft.setTextDatum(TL_DATUM);
   }
-  text("Next selects; Toggle changes setting.", 8, 218, UI_DIM_TEXT);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("UP toggles - extra OUIs: /flock/ouis.txt", 8, 212, 1);
 }
+
+static void refreshSnapshots() {
+  s_wifiN = flock_wifi::snapshot(s_wifi, flock_wifi::kMaxHits);
+  s_bleN = flock_ble::snapshot(s_ble, flock_ble::kMaxHits);
+  const int listMax = (s_tab == T_DETECT) ? (s_mode == 2 ? s_bleN : s_wifiN)
+                    : (s_tab == T_SETT) ? 5 : 0;
+  if (listMax <= 0) s_cursor = 0;
+  else if (s_cursor >= listMax) s_cursor = listMax - 1;
+}
+
 static void paint() {
   refreshSnapshots();
-  tft.fillRect(0, kContentTop, tft.width(), contentBottom()-kContentTop, TFT_BLACK);
   tabHeader();
   switch (s_tab) {
-    case T_DETECT: drawDetect(); break; case T_METER: drawMeter(); break;
-    case T_SENSORS: drawSensors(); break; case T_SCORE: drawScore(); break;
-    case T_GPS: drawGps(); break; case T_LOG: drawLog(); break; case T_SETT: drawSett(); break;
+    case T_DETECT: drawDetect(); break;
+    case T_SENSORS: drawSensors(); break;
+    case T_SCORE: drawScore(); break;
+    case T_GPS: drawGps(); break;
+    case T_LOG: drawLog(); break;
+    case T_SETT: drawSett(); break;
+    case T_METER: drawMeter(); break;
     default: break;
   }
 }
-static void settingsIo(bool write) {
-  static const char* keys[5] = {"hop", "ble", "gps", "snd", "ward"};
-  if (!s_prefs.begin("flock", !write)) return;
-  for (int i = 0; i < 5; ++i) {
-    if (write) s_prefs.putBool(keys[i], s_settings[i]);
-    else s_settings[i] = s_prefs.getBool(keys[i], true);
+
+static void loadSettings() {
+  static const char* const kKeys[6] = { "hop", "ble", "gps", "snd", "ward", "x5" };
+  s_prefs.begin("flock", true);
+  for (int i = 0; i < 6; i++) {
+    s_settings[i] = s_prefs.getBool(kKeys[i], s_settings[i]);
   }
   s_prefs.end();
 }
+static void saveSettings() {
+  static const char* const kKeys[6] = { "hop", "ble", "gps", "snd", "ward", "x5" };
+  s_prefs.begin("flock", false);
+  for (int i = 0; i < 6; i++) {
+    s_prefs.putBool(kKeys[i], s_settings[i]);
+  }
+  s_prefs.end();
+}
+
+// extra OUIs from SD (optional)
 static void loadOuis() {
   if (!flock_log::ok()) return;
-  File file = SD.open("/flock/ouis.txt"); if (!file) return;
-  while (file.available()) {
-    String value = file.readStringUntil('\n'); value.trim(); value.toLowerCase();
-    if (value.length() == 8) flock_wifi::addOui(value.c_str());
+  File f = SD.open("/flock/ouis.txt");
+  if (!f) return;
+  while (f.available()) {
+    String l = f.readStringUntil('\n');
+    l.trim();
+    l.toLowerCase();
+    if (l.length() == 8) {
+      flock_wifi::addOui(l.c_str());
+    }
   }
-  file.close();
+  f.close();
 }
+
 void openAt(uint8_t tab, uint8_t mode) {
-  s_tab = mode == 3 ? T_METER : Tab(tab < T_COUNT ? tab : 0);
-  s_mode = mode <= 2 ? mode : 0; s_cursor = 0;
+  // mode 3 from the launcher means the focused Signal Meter view.
+  if (mode == 3) { s_tab = T_METER; s_mode = 0; }
+  else           { s_tab = (Tab)(tab < T_COUNT ? tab : 0); s_mode = mode; }
+  s_cursor = 0;
 }
+
 void appSetup() {
-  feature_active = true;
+  Serial.println("[flock] setup: chrome");
+  // Let the launching tap's latch expire first, otherwise appLoop's exit
+  // check reads it as an instant close (looked like an open glitch). #1.1.
+  int dx, dy;
+  while (readTouchXYDismiss(dx, dy)) delay(10);
+  delay(350);
   pauseBackgroundRadioTasks();
-  setTouchButtonInputEnabled(true); featureClearContent(TFT_BLACK);
-  setStatusTitle("FLOCK"); drawStatusBar(readBatteryVoltage(), true); setupTouchscreen();
-  settingsIo(false);
-  flock_wifi::setMatchSound(s_settings[3]); flock_ble::setMatchSound(s_settings[3]);
-  flock_wifi::begin(); flock_ble::begin(); flock_sensors::begin();
-  if (s_settings[2]) flock_gps::begin(); else flock_gps::end();
-  flock_log::begin(); loadOuis();
-  s_nrfAct = s_lteStr = -1; s_lastScore = 0; s_wifiN = s_bleN = 0;
-  s_lastPaint = 0; s_started = true;
-  selectPhase(s_mode == 2 ? P_BLE : P_WIFI);
-  nav(); paint();
-  Serial.printf("[flock] opened view=%u mode=%u\n", unsigned(s_tab), unsigned(s_mode));
+  chrome();
+  loadSettings();
+  Serial.println("[flock] setup: radios");
+  flock_wifi::begin();
+  flock_ble::begin();
+  flock_sensors::begin();
+  flock_gps::begin();
+  Serial.println("[flock] setup: sd");
+  flock_log::begin();
+  loadOuis();
+  Serial.println("[flock] setup: done");
+  s_phase = (s_mode == 2) ? P_BLE : P_WIFI;
+  if (s_phase == P_BLE) flock_ble::startWindow();
+  s_phaseStart = millis();
+  s_lastSensMs = 0;
+  paint();
 }
-static void changeTab(int direction) {
-  s_tab = s_tab == T_METER ? T_DETECT : Tab((int(s_tab)+T_COUNT+direction)%T_COUNT);
-  s_cursor = 0; nav(); paint();
+
+// A tab is active (DETECT/METER) if its list can take UP/DOWN as navigation.
+static int listLen() {
+  if (s_tab == T_DETECT) return s_mode == 2 ? s_bleN : s_wifiN;
+  if (s_tab == T_SETT) return 5;
+  return 0;
 }
+static void cycleTab(int dir) {
+  if (s_tab == T_METER) { s_tab = T_DETECT; }     // leave the meter into DETECT
+  else s_tab = (Tab)(((int)s_tab + T_COUNT + dir) % T_COUNT);
+  s_cursor = 0;
+  paint();
+}
+
 void appLoop() {
-  if (!s_started) return;
-  if (feature_exit_requested || featureExitButtonPressed()) { feature_exit_requested = true; exit(); return; }
-  if (isButtonPressedEdge(BTN_LEFT)) changeTab(-1);
-  else if (isButtonPressedEdge(BTN_RIGHT)) changeTab(1);
-  else if (isButtonPressedEdge(BTN_DOWN)) {
-    if (s_tab == T_LOG) {
-      const bool written = flock_log::exportDeFlock();
-      showNotification(written ? "EXPORTED" : "EXPORT FAILED", written ? "/flock/deflock.csv" : flock_log::lastError());
-    } else if (s_tab == T_SETT) s_cursor = (s_cursor+1)%5;
-    else if (totalHits()) s_cursor = (s_cursor+1)%totalHits();
-    paint();
-  } else if (isButtonPressedEdge(BTN_UP)) {
-    if (s_tab == T_SETT) {
-      s_settings[s_cursor] = !s_settings[s_cursor]; settingsIo(true);
-      if (s_cursor == 3) { flock_wifi::setMatchSound(s_settings[3]); flock_ble::setMatchSound(s_settings[3]); }
-      if (s_cursor == 2) { if (s_settings[2]) flock_gps::begin(); else flock_gps::end(); }
-      if (s_cursor == 1 && !s_settings[1]) flock_ble::stopWindow();
-      if (s_cursor == 0 && s_phase == P_PROBE) { flock_wifi::stopProbeWindow(); selectPhase(P_PROBE); }
-    } else if (s_tab == T_LOG) {
-      const int count = flock_log::historyCount(); if (count) s_cursor = (s_cursor+1)%count;
-    } else if (totalHits()) s_cursor = (s_cursor+totalHits()-1)%totalHits();
-    paint();
+  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+    feature_exit_requested = true;
+    flock_wifi::stopProbeWindow();
+    flock_ble::stopWindow();
+    return;
   }
+
+  // Edge-triggered only, with a debounce: level reads (used before) made
+  // one tab press run 2-3 tabs while the tap latch was live. Issue #1.3.
+  static uint32_t s_navDb = 0;
+  const uint32_t nowMs = millis();
+  if (nowMs - s_navDb > 280) {
+    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+      s_navDb = nowMs;
+      cycleTab(-1);
+    } else if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+      s_navDb = nowMs;
+      cycleTab(+1);
+    } else if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+      s_navDb = nowMs;
+      if (s_tab == T_SETT) {
+        s_cursor = (s_cursor + 1) % 5;
+      } else if (s_tab == T_LOG) {
+        flock_log::exportDeFlock();
+        showNotification("EXPORT", "deflock.csv written to SD");
+      } else if (listLen() > 0 && s_cursor < listLen() - 1) {
+        s_cursor++;
+      }
+      paint();
+    } else if (isTouchNavButtonPressedEdge(BTN_UP)) {
+      s_navDb = nowMs;
+      if (s_tab == T_SETT) {
+        s_settings[s_cursor] = !s_settings[s_cursor];
+        saveSettings();
+      } else if (listLen() > 0 && s_cursor > 0) {
+        s_cursor--;
+      }
+      paint();
+    }
+  }
+
   if (s_settings[2]) flock_gps::poll();
   runPhase();
-  static uint32_t lastHealthMs = 0;
-  if (uint32_t(millis() - lastHealthMs) >= 5000) {
-    lastHealthMs = millis();
-    Serial.printf("[flock] phase=%s APs=%d probes=%lu BLE=%lu matches=%d/%d errors=%d/%d\n",
-      phaseName(), flock_wifi::apsSeen(), (unsigned long)flock_wifi::probeFramesSeen(),
-      (unsigned long)flock_ble::advertisementsSeen(), s_wifiN, s_bleN,
-      flock_wifi::lastError(), flock_ble::lastError());
+  static uint32_t s_hb = 0;
+  if (millis() - s_hb > 5000) {
+    s_hb = millis();
+    Serial.printf("[flock] tick phase=%d score=%d wifi=%d ble=%d nrf=%d lte=%d\n",
+                  (int)s_phase, s_lastScore, flock_wifi::hitCount(),
+                  flock_ble::matches(), s_nrfAct, s_lteStr);
   }
-  maintainTouchNavBar(); updateStatusBar();
-  if (uint32_t(millis()-s_lastPaint) >= 600) { s_lastPaint = millis(); scoreAndAlert(); paint(); }
+
+  // Repaint only when the tab content changed: fixed-cadence full repaints
+  // cleared and redrew the whole body twice a second = flicker. Issue #1.2.
+  const uint32_t nowP = millis();
+  if (nowP - s_lastPaint > 700) {
+    static uint32_t s_lastHash = 0;
+    const uint32_t h = (uint32_t)s_phase * 1000003u
+                     ^ (uint32_t)s_wifiN * 83492791u
+                     ^ (uint32_t)s_bleN * 19349663u
+                     ^ (uint32_t)s_lastScore * 73856093u
+                     ^ (uint32_t)s_nrfAct * 2654435761u
+                     ^ (uint32_t)s_lteStr * 40503u
+                     ^ (s_cursor + 1) * 6151u;
+    if (h != s_lastHash) {
+      s_lastHash = h;
+      paint();
+    }
+    s_lastPaint = nowP;
+  }
   delay(15);
 }
+
 void exit() {
-  if (!s_started) return;
-  flock_wifi::stop(); flock_ble::stopWindow(); flock_gps::end();
-  s_started = false;
-  Serial.println("[flock] closed");
+  flock_wifi::stopProbeWindow();
+  flock_ble::stopWindow();
 }
-} // namespace flock_menu
+
+}  // namespace flock_menu
