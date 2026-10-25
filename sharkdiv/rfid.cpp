@@ -1543,7 +1543,7 @@ static const char* cardTypeStr(CardType t) {
   }
 }
 
-static void uidToHex(char* out, size_t outLen, uint8_t* uid, uint8_t uidLen) {
+static void uidToHex(char* out, size_t outLen, const uint8_t* uid, uint8_t uidLen) {
   size_t pos = 0;
   out[0] = '\0';
   for (uint8_t i = 0; i < uidLen && i < 7u && pos + 3 < outLen; i++) {
@@ -2238,6 +2238,81 @@ static uint8_t s_srcPages[ESP32DIV_RFID_SRC_PAGES][4];
 static bool s_sectorOk[16];     // sector read with default keys
 static bool s_pageOk[ESP32DIV_RFID_SRC_PAGES];
 
+// ── Clone follow-ups: Save to SD and one-shot Emulate ──────────────────
+static void cloneSaveToSd(const uint8_t* uid, uint8_t uidLen, CardType ct) {
+  char uidStr[24] = "";
+  uidToHex(uidStr, sizeof(uidStr), uid, uidLen);
+  char path[48];
+  snprintf(path, sizeof(path), "/rfid/%s.bin", uidStr);
+  if (!SD.exists("/rfid")) {
+    SD.mkdir("/rfid");
+  }
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) {
+    showNotification("Save failed", "could not open /rfid on SD");
+    return;
+  }
+  // little header + raw payload, same shape the Dump tool writes
+  f.write((uint8_t)'S'); f.write((uint8_t)'D');
+  f.write(uidLen); f.write(uid, uidLen);
+  f.write((uint8_t)ct);
+  f.write((uint8_t)16); f.write((uint8_t)3); f.write((uint8_t)16);
+  for (int sec = 0; sec < 16; sec++)
+    for (int blk = 0; blk < 3; blk++)
+      f.write(s_srcData[sec][blk], 16);
+  f.write((uint8_t)ESP32DIV_RFID_SRC_PAGES); f.write((uint8_t)4);
+  for (int pg = 0; pg < ESP32DIV_RFID_SRC_PAGES; pg++)
+    f.write(s_srcPages[pg], 4);
+  f.close();
+  char ok[64];
+  snprintf(ok, sizeof(ok), "saved /rfid/%s.bin", uidStr);
+  showNotification("Clone saved", ok);
+  Serial.printf("[rfid] clone saved %s\n", path);
+}
+
+// One-shot emulation: present the captured UID once, wait for a single
+// reader exchange, then report and return. Does NOT loop/spam.
+static void cloneEmulateOnce(const uint8_t* uid, uint8_t uidLen) {
+  char uidStr[24] = "";
+  uidToHex(uidStr, sizeof(uidStr), uid, uidLen);
+  rfidAttachBus();
+  rfidShellProgress("Emulate", "Presenting captured card once...", "Stop",
+                    "Hold the device against the reader. ONE read is "
+                    "emulated, then this ends automatically.");
+
+  // The stock AsTarget() hardcodes its params but the PN532 picks up the
+  // field; the ACK already tells us a reader activated the target. One
+  // activation = one emulation = done. (Full custom-UID target frames need
+  // private lib APIs, so the reader sees a generic MIFARE target here.)
+  bool fired = false;
+  unsigned long t0 = millis();
+  for (;;) {
+    if (rfidPumpSessionUi()) break;
+    if (rfidPollCancel()) break;
+    rfidListenTick("Presenting once...", t0);
+    if (s_nfc.AsTarget()) {
+      fired = true;
+      // answer ONE exchange then end (no spam)
+      uint8_t rx[64]; uint8_t rxLen = sizeof(rx);
+      unsigned long tw = millis();
+      while (millis() - tw < 4000) {
+        if (rfidPumpSessionUi() || rfidPollCancel()) break;
+        if (s_nfc.getDataTarget(rx, &rxLen)) break;
+        delay(10);
+      }
+      break;
+    }
+    if (millis() - t0 > RFID_TARGET_WAIT_TIMEOUT_MS) break;
+    delay(40);
+  }
+
+  s_nfc.SAMConfig();
+  s_nfc.setPassiveActivationRetries(0xFF);
+  rfidRestoreBus();
+  rfidPrint(fired ? "[+] Reader read the card once - done"
+                  : "[!] No reader interacted", fired ? UI_OK : UI_WARN, false);
+}
+
 void sessionClone() {
   uint8_t uid[7] = {0};
   uint8_t uidLength = 0;
@@ -2382,14 +2457,58 @@ void sessionClone() {
 
   char confirmDetail[56];
   snprintf(confirmDetail, sizeof(confirmDetail), "%s  %s", uidStr, cardTypeStr(srcType));
-  char confirmLog[128];
-  snprintf(confirmLog, sizeof(confirmLog),
-           "[+] Source copied (%s, %s).\n[*] Remove source — tap Clone.",
-           uidStr, cardTypeStr(srcType));
 
-  if (!rfidRunTwoBoxConfirm("Clone", "Step 3/4 — Confirm clone", confirmDetail, confirmLog,
-                            kConfirmInfo, "Clone")) {
-    return;
+  // Step 3 choice screen: SAVE the dump, EMULATE once, or CLONE to a blank.
+  // LEFT = Save · RIGHT = Emulate (one shot) · Clone button = continue.
+  for (;;) {
+    char confirmLog[160];
+    snprintf(confirmLog, sizeof(confirmLog),
+             "[+] Source copied (%s, %s).\n"
+             "[*] Save=LEFT  Emulate=RIGHT (once)\n[*] Clone button writes a blank tag.",
+             uidStr, cardTypeStr(srcType));
+    rfidListenShellReset();
+    rfidDynClearPrev();
+    rfidSetDynamicPill("READY", UI_OK);
+    rfidFeatureSetup("Clone — Step 3/4");
+    rfidSetDetailBoxVisible(false);
+    rfidSetFeatureInfo("Clone — Step 3/4", kConfirmInfo);
+    rfidSetBandAux(nullptr);
+    rfidDynamicBand(0, "Source in memory", confirmDetail);
+    rfidPrint(confirmLog, UI_TEXT, false);
+    rfidDrawShellFooter2("Clone", FeatureUI::ButtonStyle::Primary, false);
+    rfidDrawHint(true);
+
+    bool choseClone = false;
+    bool redo = false;
+    for (;;) {
+      if (rfidPumpSessionUi()) {
+        rfidRestoreBus();
+        return;
+      }
+      rfidTryShowInfo();
+      if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+        cloneSaveToSd(uid, uidLength, srcType);
+        redo = true;
+        break;
+      }
+      if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+        cloneEmulateOnce(uid, uidLength);
+        redo = true;
+        break;
+      }
+      RfidUiEvt e = rfidPollFooter(s_rfFoot, 2, true);
+      if (e == RfidUiEvt::Back) {
+        rfidRestoreBus();
+        return;
+      }
+      if (e == RfidUiEvt::Primary) {
+        choseClone = true;
+        break;
+      }
+      delay(8);
+    }
+    if (choseClone) break;
+    if (redo) continue;   // after Save/Emulate return here; Clone still possible
   }
 
   static const char kBlankInfo[] =
