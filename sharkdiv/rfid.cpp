@@ -1566,14 +1566,17 @@ bool begin() {
   if (s_hwOk) {
     return true;
   }
+  Serial.println("[rfid] probing PN532...");
   rfidAttachBus();
   s_nfc.begin();
   uint32_t ver = s_nfc.getFirmwareVersion();
   if (!ver) {
+    Serial.println("[rfid] PN532 NOT DETECTED (no firmware version)");
     rfidPn532VerStr(0);
     restoreSdAfterSharedSpi();
     return false;
   }
+  Serial.printf("[rfid] PN532 firmware 0x%06lX\n", (unsigned long)ver);
   rfidPn532VerStr(ver);
   s_nfc.SAMConfig();
   s_nfc.setPassiveActivationRetries(0xFF);
@@ -1667,6 +1670,9 @@ static bool rfidListenIso14443a(const char* title, const char* footer, uint8_t* 
         return false;
       }
       if (s_nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, uidLenOut, 150)) {
+        Serial.printf("[rfid] TAG uidLen=%u uid=%02X%02X%02X%02X%02X%02X%02X\n",
+                      (unsigned)*uidLenOut, uid[0], uid[1], uid[2], uid[3],
+                      uid[4], uid[5], uid[6]);
         // A physical tag was selected; writes/emulation never trigger this cue.
         if (*uidLenOut == 4 || *uidLenOut == 7) {
           DetectionAlerts::notify(DetectionAlerts::Source::RFID,
@@ -1675,6 +1681,7 @@ static bool rfidListenIso14443a(const char* title, const char* footer, uint8_t* 
         return true;
       }
       if (millis() - t0 > timeoutMs) {
+        Serial.println("[rfid] listen TIMEOUT (no ISO14443A tag)");
         char tmsg[96];
         snprintf(tmsg, sizeof(tmsg),
                  "No ISO14443A tag in %lu s.\nTap Ready to listen again.",
@@ -2228,6 +2235,8 @@ void sessionCardReader() {
 
 static uint8_t s_srcData[16][3][16];
 static uint8_t s_srcPages[ESP32DIV_RFID_SRC_PAGES][4];
+static bool s_sectorOk[16];     // sector read with default keys
+static bool s_pageOk[ESP32DIV_RFID_SRC_PAGES];
 
 void sessionClone() {
   uint8_t uid[7] = {0};
@@ -2276,12 +2285,13 @@ void sessionClone() {
 
   memset(s_srcData, 0, sizeof(s_srcData));
   memset(s_srcPages, 0, sizeof(s_srcPages));
-  bool readOk = true;
+  memset(s_sectorOk, 0, sizeof(s_sectorOk));
+  memset(s_pageOk, 0, sizeof(s_pageOk));
 
   if (srcType == MIFARE_CLASSIC) {
     rfidTransitionToProgress("Clone", "Step 2/4 — Read source", "Cancel",
                              "Reading source Classic data blocks 0–47.");
-    for (uint8_t sector = 0; sector < 16 && readOk; sector++) {
+    for (uint8_t sector = 0; sector < 16; sector++) {
       char l1[48];
       char l2[48];
       snprintf(l1, sizeof(l1), "Classic — reading data blocks");
@@ -2294,24 +2304,29 @@ void sessionClone() {
         rfidRestoreBus();
         return;
       }
+      // Locked sectors (non-default keys) are skipped, not fatal: most real
+      // cards lock beyond the public sector. Clone what is readable.
+      bool sectorOk = true;
       for (uint8_t block = 0; block < 3; block++) {
         uint8_t blockNum = (uint8_t)(sector * 4 + block);
-        bool auth =
-            s_nfc.mifareclassic_AuthenticateBlock(uid, uidLength, blockNum, 0, keyA);
-        if (!auth) {
-          auth = s_nfc.mifareclassic_AuthenticateBlock(uid, uidLength, blockNum, 1, keyB);
-        }
-        if (auth) {
-          if (s_nfc.mifareclassic_ReadDataBlock(blockNum, data)) {
-            memcpy(s_srcData[sector][block], data, 16);
-          } else {
-            readOk = false;
+        bool got = false;
+        for (uint8_t attempt = 0; attempt < 2 && !got; attempt++) {
+          bool auth =
+              s_nfc.mifareclassic_AuthenticateBlock(uid, uidLength, blockNum, 0, keyA);
+          if (!auth) {
+            auth = s_nfc.mifareclassic_AuthenticateBlock(uid, uidLength, blockNum, 1, keyB);
           }
-        } else {
-          readOk = false;
+          if (auth && s_nfc.mifareclassic_ReadDataBlock(blockNum, data)) {
+            memcpy(s_srcData[sector][block], data, 16);
+            got = true;
+          } else {
+            delay(25);   // brief retry (tag may have slipped off the coil)
+          }
         }
+        if (!got) sectorOk = false;
         delay(18);
       }
+      s_sectorOk[sector] = sectorOk;
     }
   } else if (srcType == MIFARE_ULTRALIGHT || srcType == NTAG) {
     uint8_t maxPages = (srcType == MIFARE_ULTRALIGHT) ? 16u : 36u;
@@ -2329,10 +2344,9 @@ void sessionClone() {
         rfidRestoreBus();
         return;
       }
-      if (s_nfc.mifareultralight_ReadPage(page, data)) {
+      s_pageOk[page] = s_nfc.mifareultralight_ReadPage(page, data);
+      if (s_pageOk[page]) {
         memcpy(s_srcPages[page], data, 4);
-      } else {
-        readOk = false;
       }
       delay(12);
     }
@@ -2340,9 +2354,24 @@ void sessionClone() {
 
   rfidRestoreBus();
 
-  if (!readOk) {
-    rfidResultAndDismiss("Clone", "Read failed", "Some blocks/pages did not read.\nCheck keys or tag damage.");
+  // Sector 0 carries the UID/manufacturer block — without it a clone is
+  // meaningless. Everything else may be partial.
+  if (srcType == MIFARE_CLASSIC && !s_sectorOk[0]) {
+    rfidResultAndDismiss("Clone", "Read failed",
+                         "Sector 0 unreadable — hold the card flat and steady on the coil and retry.");
     return;
+  }
+  int locked = 0, gotSectors = 0;
+  for (int i = 0; i < 16; i++) {
+    if (s_sectorOk[i]) gotSectors++;
+    else locked++;
+  }
+  if (srcType == MIFARE_CLASSIC && locked > 0) {
+    char part[96];
+    snprintf(part, sizeof(part),
+             "Read %u/16 sectors. %u locked (non-default keys) will be skipped.",
+             (unsigned)gotSectors, (unsigned)locked);
+    rfidPrint(String("[i] ") + part, UI_WARN, false);
   }
 
   static const char kConfirmInfo[] =
@@ -2391,6 +2420,7 @@ void sessionClone() {
 
   bool cloneOk = true;
   int blocksDone = 0;
+  int skipped = 0;
 #if RFID_UID_CLONE
   bool gen2MagicDetected = false;
 #endif
@@ -2455,6 +2485,13 @@ void sessionClone() {
           continue;
         }
 #endif
+        if (!s_sectorOk[sector]) {
+          // source sector was locked — skip writing so the blank keeps its
+          // own (working) defaults instead of zeros
+          skipped++;
+          delay(4);
+          continue;
+        }
         bool auth =
             s_nfc.mifareclassic_AuthenticateBlock(uid, uidLength, blockNum, 0, keyA);
         if (!auth) {
@@ -2494,6 +2531,10 @@ void sessionClone() {
         }
         return;
       }
+      if (!s_pageOk[page]) {
+        skipped++;
+        continue;
+      }
       if (s_nfc.mifareultralight_WritePage(page, s_srcPages[page])) {
         blocksDone++;
       } else {
@@ -2515,9 +2556,10 @@ void sessionClone() {
            "Tag type:     %s\n"
            "Reader IC:    %s\n\n"
            "Approx. write ops OK: %d\n"
+           "Locked sectors skipped: %d\n"
            "Gen2 magic UID path: %s",
            cloneOk ? "Clone finished." : "Clone finished with some errors.",
-           uidStr, blankUidStr, cardTypeStr(srcType), fw, blocksDone,
+           uidStr, blankUidStr, cardTypeStr(srcType), fw, blocksDone, skipped,
            gen2MagicDetected ? "detected (UID block attempted)" : "not detected");
 #else
   snprintf(summary, sizeof(summary),
@@ -2528,7 +2570,7 @@ void sessionClone() {
            "Reader IC:    %s\n\n"
            "Approx. write ops OK: %d",
            cloneOk ? "Clone finished." : "Clone finished with some errors.",
-           uidStr, blankUidStr, cardTypeStr(srcType), fw, blocksDone);
+           uidStr, blankUidStr, cardTypeStr(srcType), fw, blocksDone, skipped);
 #endif
 
   rfidResultAndDismiss("Clone", "Done", summary);
