@@ -93,7 +93,7 @@ uint16_t uiUniversalColor();
 #define ESP32DIV_NAME "SHARKDIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.7.35-issue1"
+#define ESP32DIV_VERSION "v1.7.36-notabs"
 #endif
 
 

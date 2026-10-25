@@ -20,9 +20,14 @@
 namespace flock_menu {
 
 enum Phase : uint8_t { P_WIFI, P_PROBE, P_BLE, P_SENSORS, P_COUNT };
-// Views: the six tabs plus a focused signal meter the launcher opens directly.
-enum Tab : uint8_t { T_DETECT, T_SENSORS, T_SCORE, T_GPS, T_LOG, T_SETT, T_COUNT,
-                     T_METER = 100 };
+// Views: tab-free UI — one dashboard plus focused screens the launcher
+// can open directly (meter / settings / log).
+enum Screen : uint8_t { S_DASH, S_METER, S_SETT, S_LOG };
+static Screen s_screen = S_DASH;
+static flock_wifi::Hit s_meterTarget;   // selection snapshot for locate
+static bool s_meterHas = false;
+// legacy tab ids kept only so launcher entries can address screens
+enum Tab : uint8_t { T_DETECT, T_SENSORS, T_SCORE, T_GPS, T_LOG, T_SETT };
 
 static Phase s_phase = P_WIFI;
 static uint32_t s_phaseStart = 0;
@@ -86,26 +91,8 @@ static void chrome() {
   redrawTouchButtonBar();
 }
 
-// A compact tab strip just under the status bar; the active tab is a green pill.
-static void tabHeader() {
-  if (s_tab == T_METER) return;        // the meter is a focused view, no strip
-  static const char* const names[T_COUNT] =
-    { "DETECT", "2.4G", "SCORE", "GPS", "LOG", "SETT" };
-  tft.fillRect(0, 21, tft.width(), 22, TFT_BLACK);
-  int x = 4;
-  tft.setTextFont(1);
-  for (int i = 0; i < T_COUNT; i++) {
-    const int w = tft.textWidth(names[i], 1) + 10;
-    const bool on = (i == (int)s_tab);
-    if (on) tft.fillRoundRect(x, 24, w, 15, 4, UI_ICON);
-    else    tft.drawRoundRect(x, 24, w, 15, 4, UI_LINE);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(on ? TFT_BLACK : UI_DIM_TEXT, on ? UI_ICON : TFT_BLACK);
-    tft.drawString(names[i], x + w / 2, 32, 1);
-    x += w + 3;
-  }
-  tft.setTextDatum(TL_DATUM);
-}
+// Tabs removed (issue feedback): everything lives on one dashboard.
+static void tabHeader() {}
 
 static const char* confidenceOf(const flock_wifi::Hit& h) {
   if (h.bySsid) return "CONFIRMED";
@@ -263,8 +250,9 @@ static void drawMeter() {
   tft.fillRect(0, 21, tft.width(), contentBottom() - 21, TFT_BLACK);
   tft.setTextFont(1);
   const int n = s_wifiN;
-  const bool have = n > 0;
-  const flock_wifi::Hit* h = have ? &s_wifi[0] : nullptr;
+  const bool have = s_meterHas ? true : (n > 0);
+  const flock_wifi::Hit* h = s_meterHas ? &s_meterTarget
+                           : (n > 0 ? &s_wifi[0] : nullptr);
 
   panel(8, 26, tft.width() - 16, 30, false);
   tft.setTextColor(UI_DIM_TEXT, UI_FG);
@@ -451,26 +439,86 @@ static void drawSett() {
   tft.drawString("UP toggles - extra OUIs: /flock/ouis.txt", 8, 212, 1);
 }
 
+// ── the one dashboard: verdict banner, live proof-of-life line, list ──
+static void drawDashboard() {
+  const int16_t top = 21;
+  tft.fillRect(0, top, tft.width(), contentBottom() - top, TFT_BLACK);
+  tft.setTextFont(1);
+
+  // verdict banner
+  const char* lab = flock_score::label(s_lastScore);
+  const bool hot = s_wifiN > 0;
+  const uint16_t vc = !strcmp(lab, "CONFIRMED") ? 0x07E0
+                    : !strcmp(lab, "LIKELY") ? UI_WARN : UI_DIM_TEXT;
+  tft.fillRoundRect(6, top + 4, tft.width() - 12, 26, 4,
+                    hot ? vc : UI_LINE);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(hot ? TFT_BLACK : UI_TEXT, hot ? vc : TFT_BLACK);
+  tft.drawString(hot ? lab : "NO FLOCK DEVICE SEEN", 14, top + 17, 2);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(hot ? TFT_BLACK : UI_DIM_TEXT, hot ? vc : TFT_BLACK);
+  tft.drawString(String(s_lastScore) + "/100", tft.width() - 14, top + 17, 2);
+  tft.setTextDatum(TL_DATUM);
+
+  // proof-of-life: always shows what the radios are doing right now
+  static const char* const phaseName[] = { "wifi", "probe", "ble", "sensors" };
+  char alive[72];
+  snprintf(alive, sizeof(alive), "%s | w:%d b:%d 2g:%d%% lte:%s gps:%s",
+           phaseName[s_phase < 4 ? s_phase : 0], s_wifiN, s_bleN, s_nrfAct,
+           flock_sensors::lteBurstSeen() ? "burst" : "quiet",
+           flock_gps::fixValid() ? "fix" : "--");
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString(alive, 8, top + 36, 1);
+
+  // merged detections: wifi rows then ble rows
+  const int rowH = 26, listTop = top + 50;
+  const int vis = (contentBottom() - 16 - listTop) / rowH;
+  int y = listTop;
+  for (int i = 0; i < s_wifiN && i < vis; i++, y += rowH) {
+    const bool sel = (i == s_cursor);
+    panel(6, y, tft.width() - 12, rowH - 3, sel);
+    label(s_wifi[i].ssid[0] ? s_wifi[i].ssid : s_wifi[i].mac, 14, y + 12,
+          sel ? TFT_BLACK : UI_TEXT);
+    tft.setTextDatum(TR_DATUM);
+    tft.setTextColor(sel ? TFT_BLACK : confColor(confidenceOf(s_wifi[i])), UI_FG);
+    tft.drawString(confidenceOf(s_wifi[i]), tft.width() - 14, y + 6, 1);
+    tft.setTextColor(sel ? TFT_BLACK : UI_DIM_TEXT, UI_FG);
+    tft.drawString(String(s_wifi[i].rssi) + "dBm", tft.width() - 14, y + 17, 1);
+    tft.setTextDatum(TL_DATUM);
+  }
+  for (int k = 0; k < s_bleN && (s_wifiN + k) < vis; k++, y += rowH) {
+    const int idx = s_wifiN + k;
+    const bool sel = (idx == s_cursor);
+    panel(6, y, tft.width() - 12, rowH - 3, sel);
+    char bl[44];
+    snprintf(bl, sizeof(bl), "[ble] %s",
+             s_ble[k].name[0] ? s_ble[k].name : s_ble[k].mac);
+    label(bl, 14, y + 12, sel ? TFT_BLACK : UI_TEXT);
+    tft.setTextDatum(TR_DATUM);
+    tft.setTextColor(sel ? TFT_BLACK : UI_DIM_TEXT, UI_FG);
+    tft.drawString(String(s_ble[k].rssi) + "dBm", tft.width() - 14, y + 12, 1);
+    tft.setTextDatum(TL_DATUM);
+  }
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("UP/DOWN pick - RIGHT locate - LEFT rescan", 8,
+                 contentBottom() - 14, 1);
+}
+
 static void refreshSnapshots() {
   s_wifiN = flock_wifi::snapshot(s_wifi, flock_wifi::kMaxHits);
   s_bleN = flock_ble::snapshot(s_ble, flock_ble::kMaxHits);
-  const int listMax = (s_tab == T_DETECT) ? (s_mode == 2 ? s_bleN : s_wifiN)
-                    : (s_tab == T_SETT) ? 5 : 0;
+  const int listMax = (s_screen == S_SETT) ? 5 : (s_wifiN + s_bleN);
   if (listMax <= 0) s_cursor = 0;
   else if (s_cursor >= listMax) s_cursor = listMax - 1;
 }
 
 static void paint() {
   refreshSnapshots();
-  tabHeader();
-  switch (s_tab) {
-    case T_DETECT: drawDetect(); break;
-    case T_SENSORS: drawSensors(); break;
-    case T_SCORE: drawScore(); break;
-    case T_GPS: drawGps(); break;
-    case T_LOG: drawLog(); break;
-    case T_SETT: drawSett(); break;
-    case T_METER: drawMeter(); break;
+  switch (s_screen) {
+    case S_DASH:   drawDashboard(); break;
+    case S_METER:  drawMeter(); break;
+    case S_SETT:   drawSett(); break;
+    case S_LOG:    drawLog(); break;
     default: break;
   }
 }
@@ -509,10 +557,12 @@ static void loadOuis() {
 }
 
 void openAt(uint8_t tab, uint8_t mode) {
-  // mode 3 from the launcher means the focused Signal Meter view.
-  if (mode == 3) { s_tab = T_METER; s_mode = 0; }
-  else           { s_tab = (Tab)(tab < T_COUNT ? tab : 0); s_mode = mode; }
   s_cursor = 0;
+  s_meterHas = false;
+  if (mode == 3)              { s_screen = S_METER; s_mode = 0; }
+  else if (tab == T_SETT)     { s_screen = S_SETT;  s_mode = 0; }
+  else if (tab == T_LOG)      { s_screen = S_LOG;   s_mode = 0; }
+  else                        { s_screen = S_DASH;  s_mode = mode; }
 }
 
 void appSetup() {
@@ -543,17 +593,9 @@ void appSetup() {
 
 // A tab is active (DETECT/METER) if its list can take UP/DOWN as navigation.
 static int listLen() {
-  if (s_tab == T_DETECT) return s_mode == 2 ? s_bleN : s_wifiN;
-  if (s_tab == T_SETT) return 5;
-  return 0;
+  if (s_screen == S_SETT) return 5;
+  return s_wifiN + s_bleN;   // dashboard merges wifi + ble rows
 }
-static void cycleTab(int dir) {
-  if (s_tab == T_METER) { s_tab = T_DETECT; }     // leave the meter into DETECT
-  else s_tab = (Tab)(((int)s_tab + T_COUNT + dir) % T_COUNT);
-  s_cursor = 0;
-  paint();
-}
-
 void appLoop() {
   if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
     feature_exit_requested = true;
@@ -562,37 +604,64 @@ void appLoop() {
     return;
   }
 
-  // Edge-triggered only, with a debounce: level reads (used before) made
-  // one tab press run 2-3 tabs while the tap latch was live. Issue #1.3.
+  // No tabs — per-screen controls, edge-triggered with debounce.
   static uint32_t s_navDb = 0;
   const uint32_t nowMs = millis();
   if (nowMs - s_navDb > 280) {
-    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
       s_navDb = nowMs;
-      cycleTab(-1);
-    } else if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
-      s_navDb = nowMs;
-      cycleTab(+1);
-    } else if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
-      s_navDb = nowMs;
-      if (s_tab == T_SETT) {
+      if (s_screen == S_SETT) {
         s_cursor = (s_cursor + 1) % 5;
-      } else if (s_tab == T_LOG) {
+      } else if (s_screen == S_LOG) {
         flock_log::exportDeFlock();
         showNotification("EXPORT", "deflock.csv written to SD");
-      } else if (listLen() > 0 && s_cursor < listLen() - 1) {
+      } else if (s_screen == S_DASH && listLen() > 0 && s_cursor < listLen() - 1) {
         s_cursor++;
+      } else if (s_screen == S_METER) {
+        s_screen = S_DASH;
       }
       paint();
     } else if (isTouchNavButtonPressedEdge(BTN_UP)) {
       s_navDb = nowMs;
-      if (s_tab == T_SETT) {
+      if (s_screen == S_SETT) {
         s_settings[s_cursor] = !s_settings[s_cursor];
         saveSettings();
-      } else if (listLen() > 0 && s_cursor > 0) {
+      } else if (s_screen == S_DASH && listLen() > 0 && s_cursor > 0) {
         s_cursor--;
+      } else if (s_screen == S_METER) {
+        s_screen = S_DASH;
       }
       paint();
+    } else if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+      s_navDb = nowMs;
+      if (s_screen == S_DASH) {
+        // locate the picked target: snapshot it, open the meter
+        if (s_cursor < s_wifiN) {
+          s_meterTarget = s_wifi[s_cursor];
+          s_meterHas = true;
+          s_screen = S_METER;
+        } else {
+          s_meterHas = false;
+          s_screen = S_METER;
+        }
+        paint();
+      } else if (s_screen == S_METER) {
+        s_screen = S_DASH;
+        paint();
+      }
+    } else if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+      s_navDb = nowMs;
+      if (s_screen == S_DASH) {
+        // rescan now: restart the engine from the WiFi phase
+        flock_wifi::stopProbeWindow();
+        flock_ble::stopWindow();
+        s_phase = P_WIFI;
+        s_phaseStart = 0;
+        paint();
+      } else if (s_screen == S_METER || s_screen == S_LOG) {
+        s_screen = S_DASH;
+        paint();
+      }
     }
   }
 
