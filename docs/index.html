@@ -66,7 +66,7 @@ h1 b { color:var(--accent); }
   <section class="center">
     <div class="col">
       <h1>SHARK<b>DIV</b> flasher</h1>
-      <p class="sub">ESP32-S3 / 16 MB / STABLE v1.7.36</p>
+      <p class="sub">ESP32-S3 / 16 MB / STABLE v1.7.37</p>
 
       <div class="panel">
         <ol class="steps">
@@ -120,7 +120,7 @@ h1 b { color:var(--accent); }
 
         <section class="alt" aria-labelledby="espToolsTitle">
           <h2 id="espToolsTitle">ESP Web Tools</h2>
-          <p>Alternate installer and serial console for stable v1.7.36. The main flasher above includes this board’s backlight power fix. For the alternate installer, use USB power with the battery disconnected if the board switches off.</p>
+          <p>Alternate installer and serial console for stable v1.7.37. The main flasher above includes this board’s backlight power fix. For the alternate installer, use USB power with the battery disconnected if the board switches off.</p>
           <esp-web-install-button manifest="manifest.json">
             <button slot="activate" class="secondary" type="button" disabled>Loading ESP Web Tools…</button>
             <span slot="unsupported">Use a desktop browser with Web Serial to connect over USB.</span>
@@ -156,9 +156,9 @@ try {
   throw error;
 }
 
-const FW_URL    = "firmware/v1.7.36/full-16MB.bin";
+const FW_URL    = "firmware/v1.7.37/full-16MB.bin";
 const FW_ADDR   = 0x0;
-const LOGO_URL  = "firmware/v1.7.36/logo.bin";  // optional splash — a full/merged image, flashed at 0x0
+const LOGO_URL  = "firmware/v1.7.37/logo.bin";  // optional splash — a full/merged image, flashed at 0x0
 const LOGO_ADDR = 0x0;
 
 const $ = (id) => document.getElementById(id);
