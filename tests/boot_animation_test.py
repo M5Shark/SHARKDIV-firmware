@@ -82,6 +82,7 @@ int main(){
  static_assert(sizeof(skull_boot_frames)==3600,"Packed poses should remain in flash");
  struct Guarded{uint8_t before[16],image[BufferBytes],after[16];} frame;
  std::set<std::string> distinct;
+ bool nearTop=false,nearBottom=false,nearLeft=false,nearRight=false;
  for(unsigned index=0;index<256;++index){
   memset(&frame,0xa5,sizeof(frame));renderFrame(uint8_t(index),frame.image);
   for(uint8_t b:frame.before)assert(b==0xa5);
@@ -91,11 +92,17 @@ int main(){
   unsigned lit=0;
   for(unsigned y=0;y<Height;++y)for(unsigned x=0;x<Width;++x){
    bool white=frame.image[y*15+x/8]&(0x80>>(x&7));lit+=white;
-   if(y<35||y>=125)assert(!white);
+   // Normal poses collectively reach every screen edge. This rejects the
+   // former centered image with fixed 35-row top/bottom margins.
+   if(index>=1&&index<=9&&white){
+    nearTop|=y<4;nearBottom|=y>=Height-4;
+    nearLeft|=x<4;nearRight|=x>=Width-4;
+   }
   }
   if(index>=FrameCount-1)assert(lit==0); // black transition + invalid frame indices
-  else {assert(lit>0&&lit<Width*Height/2);distinct.insert(std::string((char*)frame.image,BufferBytes));}
+  else {assert(lit>0&&lit<Width*Height);distinct.insert(std::string((char*)frame.image,BufferBytes));}
  }
+ assert(nearTop&&nearBottom&&nearLeft&&nearRight);
  assert(distinct.size()>=8);renderFrame(0,nullptr);
  reset();play();
  assert(tft.begins==FrameCount&&tft.ends==FrameCount&&waits.size()==FrameCount);
@@ -118,7 +125,7 @@ int main(){
  }
  assert(clear<bitmap&&bitmap<name&&name<version&&version+1==events.end()-1&&events.back()=="delay");
  if(tft.begins)assert(clear>events.begin()&&*(clear-1)=="delay"); // entire intro completes before logo clear
- puts("Boot animation: guarded frames, exact pixel stream, bounded timing and skull/logo order passed");
+ puts("Boot animation: full-screen coverage, guarded frames, exact pixel stream, bounded timing and skull/logo order passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='boot-animation-') as directory:

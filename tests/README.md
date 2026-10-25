@@ -40,4 +40,4 @@ Build the firmware separately with `./build-div-mac.sh` and the dependencies in
 navigation and text, confirm receiver start/stop repeatedly, compare RF occupancy
 against a known signal, receive known Find My/Remote ID test broadcasts and test
 USB installation/power behavior. The browser manifest intentionally continues to
-serve stable v1.7.29 while the source is v1.7.33-skull.
+serve stable v1.7.29 while the source is v1.7.34-fullscreen.

@@ -25,7 +25,7 @@ Based on the original [ESP32-DIV firmware by CiferTech](https://github.com/cifer
 | Detectors | Drone Remote ID (passive BLE legacy + 2.4 GHz ASTM beacons; Basic ID and aircraft location), existing fingerprint detectors |
 | Tools | Serial Monitor, OTA Update, Touch Calibration, SD File Manager, Snake, Reaction Test, QR Code, **user apps** |
 
-Interface: flat instrument menus, compact labels, high-contrast selection, a portrait pixel-skull intro followed by a two-second shark logo splash, 4 themes, touch navigation, battery fuel gauge, SD-config settings, and a **remote-test serial console** (`u/d/l/r/k` tap, `s` state, `b` battery, `a` sound status, `t` sound test).
+Interface: flat instrument menus, compact labels, high-contrast selection, a full-screen pixel-skull intro followed by a two-second shark logo splash, 4 themes, touch navigation, battery fuel gauge, SD-config settings, and a **remote-test serial console** (`u/d/l/r/k` tap, `s` state, `b` battery, `a` sound status, `t` sound test).
 
 Detection sound defaults to On. **Settings → Detection sound** mutes all receiver alerts; the choice persists on the device without an SD card. **Test sound** plays two short chirps. New observations produce short alerts, with duplicate and burst suppression. See [detection sounds and fixes](docs/DETECTION_ALERTS.md) for coverage and verification.
 
@@ -39,7 +39,7 @@ backlight power fix. ESP Web Tools 10.1.1 provides an alternate installer and
 serial console.
 
 The flasher and `docs/manifest.json` still serve the existing **v1.7.29** stable
-binary. This source branch is **v1.7.33-skull**; build it locally until a tested
+binary. This source branch is **v1.7.34-fullscreen**; build it locally until a tested
 release is published.
 
 ## Building

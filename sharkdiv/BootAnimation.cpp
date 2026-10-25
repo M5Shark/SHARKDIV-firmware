@@ -20,22 +20,26 @@ void renderFrame(uint8_t index, uint8_t* canvas) {
     0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 7
   };
   const uint8_t pose = poses[index];
-  for (int16_t sy = 0; sy < 45; ++sy) {
+  // Cover the entire portrait display. A 34 x 45 window keeps the original
+  // pixel proportions while cropping the landscape reference around the skull.
+  // Sample every output row: there are no fixed top/bottom letterbox bands.
+  constexpr int16_t cropX = 34;
+  constexpr int16_t cropWidth = 34;
+  for (int16_t y = 0; y < Height; ++y) {
+    const int16_t sy = y * 45 / Height;
     // Reveal the first pose in two cuts, without a full-screen white flash.
     if (index == 0 && sy >= 23) continue;
     int16_t slice = 0;
-    if (index == 3 && sy >= 12 && sy < 20) slice = 6;
-    if (index == 7 && sy >= 23 && sy < 29) slice = -8;
-    for (int16_t sx = 20; sx < 80; ++sx) {
+    if (index == 3 && sy >= 12 && sy < 20) slice = 11;
+    if (index == 7 && sy >= 23 && sy < 29) slice = -14;
+    for (int16_t x = 0; x < Width; ++x) {
+      const int16_t sampleX = x - slice;
+      if (sampleX < 0 || sampleX >= Width) continue;
+      const int16_t sx = cropX + sampleX * cropWidth / Width;
       if (!(pgm_read_byte(&skull_boot_frames[pose][sy * 10 + sx / 8]) &
             (0x80 >> (sx & 7)))) continue;
       if (index == 14 && ((sx + sy) & 1)) continue;
-      const int16_t x = (sx - 20) * 2 + slice;
-      const int16_t y = 35 + sy * 2;
       pixel(canvas, x, y);
-      pixel(canvas, x + 1, y);
-      pixel(canvas, x, y + 1);
-      pixel(canvas, x + 1, y + 1);
     }
   }
 }
