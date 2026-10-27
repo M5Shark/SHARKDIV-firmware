@@ -10,6 +10,7 @@
 #include "flock_gps.h"
 #include "flock_log.h"
 #include "flock_score.h"
+#include "flock_link.h"
 #include "config.h"
 #include "utils.h"
 #include "Touchscreen.h"
@@ -113,6 +114,10 @@ static void beep(int n) {
 
 static void maybeAlert(const flock_wifi::Hit& h, int score) {
   const char* lab = flock_score::label(score);
+  // iOS link sees every scored match regardless of local alert rules
+  if (s_settings[5] && flock_link::active()) {
+    flock_link::pushDetection("wifi", h.mac, h.rssi, confidenceOf(h));
+  }
   if (!strcmp(lab, "QUIET") || !strcmp(lab, "POSSIBLE")) return;
   if (!flock_log::canAlert(h.mac, h.lastMs)) return;
 
@@ -415,11 +420,12 @@ static void drawLog() {
 }
 
 static void drawSett() {
-  static const char* const names[5] = {
-    "channel-hop probes", "BLE scan", "GPS", "sound", "wardrive autolog" };
+  static const char* const names[6] = {
+    "channel-hop probes", "BLE scan", "GPS", "sound", "wardrive autolog",
+    "iOS app link (BLE)" };
   tft.fillRect(0, kContentTop, tft.width(), contentBottom() - kContentTop, TFT_BLACK);
-  for (int i = 0; i < 5; i++) {
-    const int y = 50 + i * 30;
+  for (int i = 0; i < 6; i++) {
+    const int y = 46 + i * 28;
     const bool sel = (i == s_cursor);
     panel(8, y, tft.width() - 16, 26, sel);
     label(names[i], 16, y + 17, sel ? TFT_BLACK : UI_TEXT);
@@ -567,6 +573,7 @@ void openAt(uint8_t tab, uint8_t mode) {
 
 void appSetup() {
   Serial.println("[flock] setup: chrome");
+  if (s_settings[5]) flock_link::start();
   // Let the launching tap's latch expire first, otherwise appLoop's exit
   // check reads it as an instant close (looked like an open glitch). #1.1.
   int dx, dy;
@@ -593,7 +600,7 @@ void appSetup() {
 
 // A tab is active (DETECT/METER) if its list can take UP/DOWN as navigation.
 static int listLen() {
-  if (s_screen == S_SETT) return 5;
+  if (s_screen == S_SETT) return 6;
   return s_wifiN + s_bleN;   // dashboard merges wifi + ble rows
 }
 void appLoop() {
@@ -611,7 +618,7 @@ void appLoop() {
     if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
       s_navDb = nowMs;
       if (s_screen == S_SETT) {
-        s_cursor = (s_cursor + 1) % 5;
+        s_cursor = (s_cursor + 1) % 6;
       } else if (s_screen == S_LOG) {
         flock_log::exportDeFlock();
         showNotification("EXPORT", "deflock.csv written to SD");
@@ -626,6 +633,10 @@ void appLoop() {
       if (s_screen == S_SETT) {
         s_settings[s_cursor] = !s_settings[s_cursor];
         saveSettings();
+        if (s_cursor == 5) {   // iOS link toggle
+          if (s_settings[5]) flock_link::start();
+          else               flock_link::stop();
+        }
       } else if (s_screen == S_DASH && listLen() > 0 && s_cursor > 0) {
         s_cursor--;
       } else if (s_screen == S_METER) {
@@ -699,6 +710,7 @@ void appLoop() {
 void exit() {
   flock_wifi::stopProbeWindow();
   flock_ble::stopWindow();
+  flock_link::stop();
 }
 
 }  // namespace flock_menu
